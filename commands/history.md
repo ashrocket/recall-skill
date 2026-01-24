@@ -1,4 +1,4 @@
-Show bash command history from this Claude Code session.
+Show shell command history from this Claude Code session.
 
 Usage:
 - `/history` - Show last 20 commands
