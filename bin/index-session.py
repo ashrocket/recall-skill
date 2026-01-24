@@ -42,7 +42,8 @@ def parse_session_full(session_file: Path) -> dict:
         'failures': [],
         'failure_patterns': {},
         'topics': set(),
-        'summary': ''
+        'summary': '',
+        'skills_used': []  # Track skill invocations
     }
 
     try:
@@ -68,7 +69,7 @@ def parse_session_full(session_file: Path) -> dict:
                             words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b|\b[a-z]+(?:_[a-z]+)+\b', content)
                             result['topics'].update(words[:10])
 
-                # Extract tool calls (bash commands)
+                # Extract tool calls (bash commands and skill invocations)
                 if obj.get('type') == 'assistant':
                     msg = obj.get('message', {})
                     if isinstance(msg, dict):
@@ -76,7 +77,10 @@ def parse_session_full(session_file: Path) -> dict:
                         if isinstance(content, list):
                             for block in content:
                                 if isinstance(block, dict) and block.get('type') == 'tool_use':
-                                    if block.get('name') == 'Bash':
+                                    tool_name = block.get('name', '')
+
+                                    # Track Bash commands
+                                    if tool_name == 'Bash':
                                         cmd_input = block.get('input', {})
                                         command = cmd_input.get('command', '')
                                         if command:
@@ -84,6 +88,16 @@ def parse_session_full(session_file: Path) -> dict:
                                                 'index': i,
                                                 'tool_id': block.get('id', ''),
                                                 'command': command[:300]
+                                            })
+
+                                    # Track Skill invocations
+                                    elif tool_name == 'Skill':
+                                        skill_input = block.get('input', {})
+                                        skill_name = skill_input.get('skill', '')
+                                        if skill_name:
+                                            result['skills_used'].append({
+                                                'skill': skill_name,
+                                                'timestamp': obj.get('timestamp', '')
                                             })
 
                 # Extract tool results (to find failures)
@@ -170,11 +184,15 @@ def load_index(project_folder: str) -> dict:
             pass
 
     return {
-        'version': 1,
+        'version': 2,
         'project': project_folder,
         'sessions': {},
         'failure_patterns': {},
-        'learnings': []
+        'learnings': [],
+        'usage': {
+            'skills': {},           # skill_name -> {count, last_used, sessions}
+            'learnings_shown': {}   # learning_key -> {count, last_shown}
+        }
     }
 
 def save_index(project_folder: str, index: dict):
@@ -214,10 +232,33 @@ def main():
         'message_count': len(session_data['user_messages']),
         'command_count': len(session_data['commands']),
         'failure_count': len(session_data['failures']),
+        'skill_count': len(session_data['skills_used']),
         'topics': session_data['topics'],
         'user_messages': session_data['user_messages'][:20],  # Keep first 20
-        'failures': session_data['failures'][:10]  # Keep first 10 failures
+        'failures': session_data['failures'][:10],  # Keep first 10 failures
+        'skills_used': session_data['skills_used'][:20]  # Keep first 20 skill uses
     }
+
+    # Ensure usage section exists (for older indices)
+    if 'usage' not in index:
+        index['usage'] = {'skills': {}, 'learnings_shown': {}}
+
+    # Update skill usage stats
+    for skill_use in session_data['skills_used']:
+        skill_name = skill_use['skill']
+        if skill_name not in index['usage']['skills']:
+            index['usage']['skills'][skill_name] = {
+                'count': 0,
+                'sessions': [],
+                'first_used': session_data['date'],
+                'last_used': session_data['date']
+            }
+        index['usage']['skills'][skill_name]['count'] += 1
+        index['usage']['skills'][skill_name]['last_used'] = session_data['date']
+        if session_id not in index['usage']['skills'][skill_name]['sessions']:
+            index['usage']['skills'][skill_name]['sessions'].append(session_id)
+            # Keep only last 10 sessions per skill
+            index['usage']['skills'][skill_name]['sessions'] = index['usage']['skills'][skill_name]['sessions'][-10:]
 
     # Merge failure patterns into global patterns
     for pattern, failures in session_data['failure_patterns'].items():
@@ -233,7 +274,8 @@ def main():
     # Save updated index
     save_index(project_folder, index)
 
-    print(f"Indexed session {session_id[:8]}... ({len(session_data['user_messages'])} messages, {len(session_data['commands'])} commands, {len(session_data['failures'])} failures)")
+    skills_msg = f", {len(session_data['skills_used'])} skills" if session_data['skills_used'] else ""
+    print(f"Indexed session {session_id[:8]}... ({len(session_data['user_messages'])} messages, {len(session_data['commands'])} commands, {len(session_data['failures'])} failures{skills_msg})")
 
 if __name__ == '__main__':
     main()
