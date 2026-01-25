@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "sops": {
+    "SHELL_PARSE_ERROR": {
+      "description": "zsh cannot parse command substitution or special characters",
+      "patterns": ["parse error", "near `('", "parse error near"],
+      "causes": [
+        "Using $(...) with complex expressions",
+        "Nested command substitutions",
+        "Special characters not escaped"
+      ],
+      "fixes": [
+        "Use simple pipes instead of $(...)",
+        "Split into multiple commands",
+        "Use Read tool instead of cat/head"
+      ],
+      "examples": {
+        "bad": "LATEST=$(ls -t *.jsonl | head -1); cat \"$LATEST\"",
+        "good": "ls -t *.jsonl | head -1  # then use Read tool"
+      }
+    },
+    "SYNTAX_ERROR": {
+      "description": "Python or shell syntax error in inline code",
+      "patterns": ["syntaxerror", "syntax error", "invalid syntax"],
+      "causes": [
+        "f-strings with escaped quotes inside dict access",
+        "Mixing single/double quotes incorrectly",
+        "Heredoc escaping issues"
+      ],
+      "fixes": [
+        "Extract dict values to variables before f-string",
+        "Write Python to a script file instead of -c",
+        "Use single quotes for outer string in python3 -c"
+      ],
+      "examples": {
+        "bad": "python3 -c 'print(f\"{d[\\\"key\\\"]}\")'",
+        "good": "python3 -c 'val = d[\"key\"]; print(f\"{val}\")'"
+      }
+    },
+    "COMMAND_NOT_FOUND": {
+      "description": "Command or binary doesn't exist or isn't in PATH",
+      "patterns": ["command not found", "not found"],
+      "causes": [
+        "Tool not installed",
+        "Wrong command name",
+        "PATH not set correctly"
+      ],
+      "fixes": [
+        "Check if installed: which <command>",
+        "Install if needed: brew install <package>",
+        "Use alternative (grep instead of rg)"
+      ],
+      "examples": {
+        "bad": "rg pattern  # if ripgrep not installed",
+        "good": "grep -r pattern  # or: brew install ripgrep"
+      }
+    },
+    "PERMISSION_DENIED": {
+      "description": "No permission to execute or access file",
+      "patterns": ["permission denied"],
+      "causes": [
+        "Script not executable",
+        "File owned by different user",
+        "Directory permissions too restrictive"
+      ],
+      "fixes": [
+        "Make script executable: chmod +x script.sh",
+        "Run with interpreter: python3 script.py",
+        "Check file ownership: ls -la file"
+      ],
+      "examples": {
+        "bad": "./script.py  # not executable",
+        "good": "python3 ./script.py"
+      }
+    },
+    "FILE_NOT_FOUND": {
+      "description": "File or directory doesn't exist",
+      "patterns": ["no such file", "not found", "does not exist"],
+      "causes": [
+        "Typo in path",
+        "File not created yet",
+        "Wrong working directory"
+      ],
+      "fixes": [
+        "Verify path exists: ls -la <parent_dir>",
+        "Check current directory: pwd",
+        "Create directory if needed: mkdir -p <dir>",
+        "Use absolute paths"
+      ],
+      "examples": {
+        "bad": "cat config.json  # in wrong directory",
+        "good": "ls -la . && cat ./config.json"
+      }
+    },
+    "NON_ZERO_EXIT": {
+      "description": "Command ran but returned non-zero exit code",
+      "patterns": ["exit code", "exited with", "returned"],
+      "causes": [
+        "Command logic failed",
+        "Missing required arguments",
+        "Invalid input data"
+      ],
+      "fixes": [
+        "Check stderr for details",
+        "For grep: exit 1 means no match (often ok)",
+        "Add || true if exit code doesn't matter"
+      ],
+      "examples": {
+        "bad": "grep pattern file.txt  # exits 1 if no match",
+        "good": "grep pattern file.txt || echo 'No matches'"
+      }
+    }
+  }
+}
