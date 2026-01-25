@@ -11,8 +11,8 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Add lib to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+# Add lib to path (resolve symlink first)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from sops import load_sops, match_error, format_sop
 
 STATE_FILE = Path.home() / ".claude" / "shell-failures" / ".last-failure"

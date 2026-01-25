@@ -9,8 +9,8 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-# Add lib to path
-SKILL_DIR = Path(__file__).parent.parent
+# Add lib to path (resolve symlink first)
+SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR / "lib"))
 from sops import load_sops, match_error, format_sop
 
