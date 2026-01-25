@@ -8,7 +8,7 @@ from pathlib import Path
 
 CLAUDE_DIR = Path.home() / ".claude"
 HOOKS_FILE = CLAUDE_DIR / "hooks.json"
-SKILL_DIR = Path(__file__).parent.parent
+SKILL_DIR = Path(__file__).resolve().parent.parent
 
 HOOK_CONFIG = {
     "matcher": "Bash",
