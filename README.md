@@ -1,34 +1,37 @@
 # recall-skill
 
-A Claude Code skill for searching and recalling information from past sessions.
+A collection of Claude Code skills for session memory, failure tracking, and command history.
 
-**recall-skill** automatically indexes your Claude Code sessions and provides a searchable history with:
+## Skills Overview
+
+| Skill | Command | Hooks | Overhead |
+|-------|---------|-------|----------|
+| **recall** | `/recall` | SessionStart + SessionEnd | Every session start/end |
+| **failures** | `/failures` | PostToolUse (Bash) | Every Bash command |
+| **history** | `/history` | None | On-demand only |
+
+### recall - Session Memory
+
+Automatically indexes your Claude Code sessions and provides searchable history:
 - Session summaries and user messages
 - Failure pattern tracking and categorization
 - Structured learnings and best practices
-- Cleanup tools for managing session data
+- Cross-session search
 
-## Features
+### failures - Bash Failure SOPs
 
-### Session Indexing
-Every time a Claude Code session ends, the skill automatically:
-- Extracts user messages and commands
-- Identifies and categorizes failures (permission denied, not found, syntax errors, etc.)
-- Builds a searchable index at `~/.claude/projects/{project}/recall-index.json`
+Tracks bash command failures and provides Standard Operating Procedures:
+- Automatic failure detection after each Bash command
+- Pattern matching to known error types
+- SOPs with proven solutions
+- Learning from what worked vs what failed
 
-### Session Context on Startup
-When you start a new session, you'll see:
-- Summary of your last session
-- Total sessions and failure count
-- Recurring failure patterns as warnings
-- Hints about incomplete tasks
+### history - Command History
 
-### Searchable History
-Use `/recall` commands to:
-- List recent sessions with stats
-- Search for specific topics across sessions
-- View failure patterns and learnings
-- Analyze and clean up old data
+Simple on-demand command history viewer:
+- View recent commands from the current session
+- Filter to show only failed commands
+- No hooks, no overhead
 
 ## Installation
 
@@ -38,14 +41,31 @@ cd recall-skill
 ./install.sh
 ```
 
-The install script will:
-1. Copy scripts to `~/.claude/bin/`
-2. Copy the command to `~/.claude/commands/`
-3. Show instructions for adding hooks to your `settings.json`
+### Installation Options
 
-### Manual Hook Configuration
+```bash
+# Install everything (default)
+./install.sh
 
-Add to `~/.claude/settings.json`:
+# Install specific skills
+./install.sh --recall           # Just session memory
+./install.sh --failures         # Just failure SOPs
+./install.sh --history          # Just command history
+
+# Combine options
+./install.sh --recall --history # Session memory + history, no bash hook
+
+# Minimal install (no hooks, no overhead)
+./install.sh --minimal          # Same as --history
+```
+
+Use `./install.sh --help` for full details.
+
+### Hook Configuration
+
+After installation, add hooks to `~/.claude/settings.json`. The installer shows the exact configuration needed based on your selected skills.
+
+**Full configuration (all skills):**
 
 ```json
 {
@@ -71,6 +91,18 @@ Add to `~/.claude/settings.json`:
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/on-bash-failure.py",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
@@ -78,7 +110,7 @@ Add to `~/.claude/settings.json`:
 
 ## Usage
 
-### Basic Commands
+### /recall - Session Memory
 
 | Command | Description |
 |---------|-------------|
@@ -88,7 +120,7 @@ Add to `~/.claude/settings.json`:
 | `/recall failures` | Show failure patterns and learnings |
 | `/recall cleanup` | Analyze index for cleanup opportunities |
 
-### Examples
+**Examples:**
 
 ```bash
 # Find discussions about authentication
@@ -99,12 +131,64 @@ Add to `~/.claude/settings.json`:
 
 # Check recurring errors and best practices
 /recall failures
-
-# Clean up old data and see disk usage
-/recall cleanup
 ```
 
-## Index Structure
+### /failures - Bash Failure SOPs
+
+| Command | Description |
+|---------|-------------|
+| `/failures` | Show recent failures with resolutions |
+| `/failures --sop` | Include Standard Operating Procedures |
+| `/failures --recent 20` | Show more failure groups |
+
+The failures skill:
+1. Tracks every bash command and its exit status
+2. Groups failures by error type (permission denied, not found, etc.)
+3. Records what commands eventually worked
+4. Provides SOPs based on learned patterns
+
+### /history - Command History
+
+| Command | Description |
+|---------|-------------|
+| `/history` | Show last 20 commands |
+| `/history 50` | Show last 50 commands |
+| `/history --failures` | Show only failed commands with errors |
+
+## Choosing What to Install
+
+**Install everything** if you want full session memory and failure tracking. The hooks add minimal latency but run on every session and bash command.
+
+**Install --recall only** if you want session search without the per-bash-command overhead.
+
+**Install --failures only** if you mainly want bash failure SOPs without session indexing.
+
+**Install --minimal** (history only) if you want zero overhead - just on-demand command history.
+
+## File Structure
+
+```
+~/.claude/
+├── bin/
+│   ├── recall-sessions.py    # recall CLI
+│   ├── index-session.py      # recall SessionEnd hook
+│   ├── session-context.py    # recall SessionStart hook
+│   ├── claude-failures       # failures CLI
+│   └── claude-history        # history CLI
+├── hooks/
+│   └── on-bash-failure.py    # failures PostToolUse hook
+├── commands/
+│   ├── recall.md             # /recall skill definition
+│   ├── failures.md           # /failures skill definition
+│   └── history.md            # /history skill definition
+├── projects/
+│   └── {project}/
+│       ├── recall-index.json # Searchable index (recall)
+│       └── *.jsonl           # Raw session files
+└── settings.json             # Hook configuration
+```
+
+## Index Structure (recall)
 
 The recall index (`recall-index.json`) contains:
 
@@ -129,20 +213,13 @@ The recall index (`recall-index.json`) contains:
     "not_found": [...],
     "git_error": [...]
   },
-  "learnings": [
-    {
-      "category": "shell",
-      "title": "Avoid complex command substitution",
-      "description": "zsh parses $(...) differently",
-      "solution": "Split into multiple simple commands"
-    }
-  ]
+  "learnings": [...]
 }
 ```
 
 ## Learnings
 
-The `learnings` array stores actionable best practices. Each learning should have:
+The `learnings` array stores actionable best practices:
 
 | Field | Description |
 |-------|-------------|
@@ -153,66 +230,9 @@ The `learnings` array stores actionable best practices. Each learning should hav
 | `tools` | (Optional) Map of tool names to usage examples |
 | `examples` | (Optional) Array of example commands |
 
-### Example Learning
-
-```json
-{
-  "category": "bitbucket",
-  "title": "Use BB CLI tools instead of gh",
-  "description": "This project uses Bitbucket, NOT GitHub",
-  "solution": "Use tools at ~/code/kureapp-tools/bitbucket/",
-  "tools": {
-    "create-pr.sh": "./create-pr.sh -t 'Title' -c",
-    "merge-pr.sh": "./merge-pr.sh PR_ID"
-  },
-  "examples": [
-    "~/code/tools/bitbucket/create-pr.sh -t 'Fix bug' -c",
-    "~/code/tools/bitbucket/merge-pr.sh 42"
-  ]
-}
-```
-
-## Cleanup Mode
-
-When you run `/recall cleanup`, Claude will:
-
-1. **Analyze sessions** - Identify low-value sessions (<3 messages) and sessions containing sensitive data
-2. **Check failure patterns** - Report noise level and suggest clearing non-actionable errors
-3. **Verify learnings** - Check that useful learnings exist
-4. **Report disk usage** - Show raw `.jsonl` file sizes and warn if >50MB
-
-### What to Clean
-
-- **Delete immediately**: Sessions containing API keys, SSH keys, tokens, passwords
-- **Consider removing**: Sessions with <3 messages, old sessions with no learnings extracted
-- **Clear from failure_patterns**: One-off errors, DNS lookups for non-existent domains
-- **Keep/add to learnings**: Recurring issues with actionable fixes
-
-## File Structure
-
-```
-~/.claude/
-├── bin/
-│   ├── recall-sessions.py    # Main CLI
-│   ├── index-session.py      # SessionEnd hook
-│   └── session-context.py    # SessionStart hook
-├── commands/
-│   └── recall.md             # Skill definition
-├── projects/
-│   └── {project}/
-│       ├── recall-index.json # Searchable index
-│       └── *.jsonl           # Raw session files
-└── settings.json             # Hook configuration
-```
-
-## Requirements
-
-- Python 3.8+
-- Claude Code CLI
-
 ## Failure Categories
 
-The skill automatically categorizes failures:
+Both recall and failures skills categorize errors:
 
 | Category | Triggers |
 |----------|----------|
@@ -227,12 +247,17 @@ The skill automatically categorizes failures:
 | `python_error` | "Traceback", "Exception" |
 | `other_error` | Everything else |
 
+## Requirements
+
+- Python 3.8+
+- Claude Code CLI
+
 ## Tips
 
-1. **Add learnings proactively** - When you solve a recurring issue, add it to learnings so Claude remembers
-2. **Clean up regularly** - Run `/recall cleanup` monthly to remove noise
-3. **Search before asking** - Use `/recall <topic>` to find past discussions
-4. **Check failures** - Run `/recall failures` when hitting errors to see past solutions
+1. **Start minimal** - Try `--history` first, add more skills as needed
+2. **Add learnings proactively** - When you solve a recurring issue, add it to learnings
+3. **Clean up regularly** - Run `/recall cleanup` monthly to remove noise
+4. **Search before asking** - Use `/recall <topic>` to find past discussions
 
 ## Contributing
 
