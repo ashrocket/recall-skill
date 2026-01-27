@@ -7,6 +7,7 @@ Usage:
 - `/recall [search term]` - Search past sessions for specific topics
 - `/recall last` - Show details from the most recent previous session
 - `/recall failures` - Show failure patterns and learnings
+- `/recall knowledge` - Show current CLAUDE.md contents (global and project)
 - `/recall cleanup` - Clean up old sessions and manage learnings
 - `/recall learn` - Review and approve pending learnings
 - `/recall learn --batch` - Accept all pending learnings with suggested scope

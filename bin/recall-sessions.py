@@ -805,6 +805,31 @@ def main():
                 subprocess.run(args)
             else:
                 print("Learn script not found. Check installation.")
+        elif cmd_name == 'knowledge':
+            # Show current knowledge
+            try:
+                sys.path.insert(0, str(Path(__file__).parent.parent / 'lib'))
+                from knowledge import get_all_knowledge, GLOBAL_CLAUDE_MD, get_project_claude_md
+
+                print("## Current Knowledge")
+                print()
+                print(f"**Global:** `{GLOBAL_CLAUDE_MD}`")
+                print(f"**Project:** `{get_project_claude_md()}`")
+                print()
+
+                knowledge = get_all_knowledge()
+                for cat, items in knowledge.items():
+                    if items:
+                        print(f"### {cat}")
+                        for item in items:
+                            print(f"  - {item}")
+                        print()
+
+                if not any(knowledge.values()):
+                    print("No knowledge loaded yet.")
+                    print("Use `/recall learn` to review and approve pending learnings.")
+            except ImportError as e:
+                print(f"Knowledge library not found: {e}")
         else:
             # Search
             search_sessions(command, index, sessions, project_folder)
