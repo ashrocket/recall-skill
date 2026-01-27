@@ -50,6 +50,21 @@ def load_session_details(project_folder: str, session_id: str) -> dict:
     return None
 
 
+def list_all_project_indices() -> list:
+    """List all project folders with recall indices."""
+    projects_dir = Path.home() / '.claude' / 'projects'
+    if not projects_dir.exists():
+        return []
+
+    projects = []
+    for proj_dir in projects_dir.iterdir():
+        if proj_dir.is_dir():
+            index_file = proj_dir / 'recall-index.json'
+            if index_file.exists():
+                projects.append(proj_dir.name)
+    return projects
+
+
 def load_index(project_folder: str) -> dict:
     """Load recall index if it exists."""
     index_file = Path.home() / '.claude' / 'projects' / project_folder / 'recall-index.json'
@@ -636,8 +651,58 @@ def search_sessions(search_term: str, index: dict, sessions: list, project_folde
                 print(f"  > {match[:200]}...")
             print()
 
-    if not found:
-        print(f"No matches found for '{search_term}' in recent sessions.")
+    if found:
+        return
+
+    # No local results - search other projects
+    print(f"No results in current project ({project_folder[-30:]}).")
+    print()
+
+    all_projects = list_all_project_indices()
+    other_projects = [p for p in all_projects if p != project_folder]
+
+    if not other_projects:
+        print("No other projects to search.")
+        return
+
+    global_results = []
+
+    for proj in other_projects:
+        proj_index = load_index(proj)
+        if not proj_index:
+            continue
+
+        proj_sessions = proj_index.get('sessions', {})
+        matches_in_proj = []
+
+        for session_id, session_summary in proj_sessions.items():
+            summary = session_summary.get('summary', '')
+            if search_lower in summary.lower():
+                matches_in_proj.append({
+                    'session_id': session_id,
+                    'date': session_summary.get('date', ''),
+                    'summary': summary
+                })
+
+        if matches_in_proj:
+            global_results.append({
+                'project': proj,
+                'matches': matches_in_proj
+            })
+
+    if global_results:
+        print(f"Found matches in {len(global_results)} other project(s):")
+        print()
+        for result in global_results:
+            proj_name = result['project'].split('-')[-1] if '-' in result['project'] else result['project']
+            print(f"### {proj_name} ({len(result['matches'])} matches)")
+            for match in result['matches'][:3]:
+                print(f"  > [{match['date'][:10]}] {match['summary'][:150]}...")
+            if len(result['matches']) > 3:
+                print(f"  ... and {len(result['matches']) - 3} more")
+            print()
+    else:
+        print(f"No matches found for '{search_term}' in any project.")
 
 def list_sessions(index: dict, sessions: list, project_folder: str):
     """List recent sessions with summaries."""
