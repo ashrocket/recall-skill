@@ -91,6 +91,27 @@ def main():
     if total_sessions > 1:
         output.append(f"**History**: {total_sessions} sessions, {total_failures} total failures")
 
+    # Show knowledge summary (v2)
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent / 'lib'))
+        from knowledge import get_all_knowledge, format_knowledge_summary
+        from pending import get_pending_count
+
+        knowledge = get_all_knowledge()
+        has_knowledge = any(knowledge.values())
+
+        if has_knowledge:
+            output.append("")
+            output.append("**Knowledge loaded:**")
+            output.append(format_knowledge_summary(knowledge))
+
+        pending = get_pending_count()
+        if pending > 0:
+            output.append("")
+            output.append(f"**Pending:** {pending} learnings awaiting review (`/recall learn`)")
+    except ImportError:
+        pass  # Knowledge library not installed
+
     # Show recurring failure patterns (if any)
     significant_patterns = []
     for pattern, failures in failure_patterns.items():
