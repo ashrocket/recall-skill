@@ -29,6 +29,27 @@ def get_project_folder(cwd: str) -> str:
     """Convert working directory to Claude's project folder naming convention."""
     return cwd.replace('/', '-')
 
+
+def get_session_details_dir(project_folder: str) -> Path:
+    """Get the directory for storing session detail files."""
+    return Path.home() / '.claude' / 'projects' / project_folder / 'recall-sessions'
+
+
+def load_session_details(project_folder: str, session_id: str) -> dict:
+    """Load full session details from separate file.
+
+    Returns None if detail file doesn't exist.
+    """
+    details_file = get_session_details_dir(project_folder) / f"{session_id}.json"
+    if details_file.exists():
+        try:
+            with open(details_file, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return None
+
+
 def load_index(project_folder: str) -> dict:
     """Load recall index if it exists."""
     index_file = Path.home() / '.claude' / 'projects' / project_folder / 'recall-index.json'
@@ -479,8 +500,11 @@ def show_cleanup_analysis(index: dict, sessions: list, project_folder: str):
     print("Key learnings to ensure: BB tools at ~/code/kureapp-tools/bitbucket/")
 
 def show_last_session(index: dict, sessions: list, project_folder: str):
-    """Show previous session details."""
-    # Try index first
+    """Show previous session details.
+
+    Uses tiered storage: loads full details from session file if available.
+    """
+    # Try index first to identify the previous session
     if index and index.get('sessions'):
         sorted_sessions = sorted(
             index['sessions'].items(),
@@ -490,29 +514,42 @@ def show_last_session(index: dict, sessions: list, project_folder: str):
 
         # Skip current (first), show previous
         if len(sorted_sessions) >= 2:
-            session_id, session = sorted_sessions[1]
-            print("## Previous Session")
-            print(f"**Date:** {format_date(session.get('date', ''))}")
-            print(f"**Session:** {session_id[:8]}...")
-            print(f"**Stats:** {session.get('message_count', 0)} messages, {session.get('command_count', 0)} commands, {session.get('failure_count', 0)} failures")
-            print()
-            print("### User Messages:")
-            for i, msg in enumerate(session.get('user_messages', [])[:15], 1):
-                content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
-                clean_msg = content.replace('\n', ' ').strip()[:200]
-                if clean_msg:
-                    print(f"{i}. {clean_msg}")
+            session_id, session_summary = sorted_sessions[1]
 
-            # Show failures if any
-            failures = session.get('failures', [])
-            if failures:
+            # Try to load full details from separate file
+            details = load_session_details(project_folder, session_id)
+
+            print("## Previous Session")
+            print(f"**Date:** {format_date(session_summary.get('date', ''))}")
+            print(f"**Session:** {session_id[:8]}...")
+            print(f"**Stats:** {session_summary.get('message_count', 0)} messages, {session_summary.get('command_count', 0)} commands, {session_summary.get('failure_count', 0)} failures")
+            print()
+
+            # Use details file if available (has full content)
+            if details:
+                print("### User Messages:")
+                for i, msg in enumerate(details.get('user_messages', [])[:15], 1):
+                    content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+                    clean_msg = content.replace('\n', ' ').strip()[:200]
+                    if clean_msg:
+                        print(f"{i}. {clean_msg}")
+
+                # Show failures if any
+                failures = details.get('failures', [])
+                if failures:
+                    print()
+                    print("### Failures:")
+                    for f in failures[:5]:
+                        cmd = f.get('command', '')[:80]
+                        error = f.get('error', '')[:150]
+                        print(f"  - `{cmd}`")
+                        print(f"    {error}")
+            else:
+                # Fallback to summary from index
+                print("### Summary:")
+                print(f"  {session_summary.get('summary', 'No summary')}")
                 print()
-                print("### Failures:")
-                for f in failures[:5]:
-                    cmd = f.get('command', '')[:60]
-                    error = f.get('error', '')[:100]
-                    print(f"  - `{cmd}`")
-                    print(f"    {error}")
+                print("_(Full details not available - session was indexed before tiered storage)_")
             return
 
     # Fallback to JSONL parsing
@@ -534,26 +571,45 @@ def show_last_session(index: dict, sessions: list, project_folder: str):
             print(f"{i}. {clean_msg[:200]}")
 
 def search_sessions(search_term: str, index: dict, sessions: list, project_folder: str):
-    """Search for term across sessions."""
+    """Search for term across sessions.
+
+    Searches both index summaries and detail files for comprehensive results.
+    """
     print(f"## Searching for: '{search_term}'")
     print()
 
     found = False
+    search_lower = search_term.lower()
 
-    # Search index first
+    # Search sessions - try detail files first, fall back to index
     if index and index.get('sessions'):
-        for session_id, session in index['sessions'].items():
-            messages = session.get('user_messages', [])
+        sorted_sessions = sorted(
+            index['sessions'].items(),
+            key=lambda x: x[1].get('date', ''),
+            reverse=True
+        )
+
+        for session_id, session_summary in sorted_sessions[:20]:  # Search last 20 sessions
             matches = []
 
-            for msg in messages:
-                content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
-                if search_term.lower() in content.lower():
-                    matches.append(content)
+            # Try to load full details
+            details = load_session_details(project_folder, session_id)
+
+            if details:
+                # Search in detail file (more content)
+                for msg in details.get('user_messages', []):
+                    content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+                    if search_lower in content.lower():
+                        matches.append(content)
+            else:
+                # Fall back to summary in index
+                summary = session_summary.get('summary', '')
+                if search_lower in summary.lower():
+                    matches.append(summary)
 
             if matches:
                 found = True
-                print(f"### {format_date(session.get('date', ''))} ({session_id[:8]}...)")
+                print(f"### {format_date(session_summary.get('date', ''))} ({session_id[:8]}...)")
                 for match in matches[:3]:
                     print(f"  > {match[:200]}...")
                 print()
@@ -561,7 +617,7 @@ def search_sessions(search_term: str, index: dict, sessions: list, project_folde
         # Also search failure patterns
         for pattern, failures in index.get('failure_patterns', {}).items():
             for f in failures:
-                if search_term.lower() in f.get('command', '').lower() or search_term.lower() in f.get('error', '').lower():
+                if search_lower in f.get('command', '').lower() or search_lower in f.get('error', '').lower():
                     if not found:
                         print("### In Failure Patterns:")
                     found = True

@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""
+Skill management CLI for Claude Code.
+
+Commands:
+  skill install <path>   Install a skill from source directory
+  skill upgrade <name>   Upgrade an installed skill
+  skill list             List installed skills
+"""
+
+import sys
+import os
+import json
+import shutil
+import re
+import yaml
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+# Paths
+CLAUDE_DIR = Path.home() / '.claude'
+SKILLS_JSON = CLAUDE_DIR / 'skills.json'
+SETTINGS_JSON = CLAUDE_DIR / 'settings.json'
+
+
+def parse_skill_md(skill_path: Path) -> dict:
+    """Parse SKILL.md frontmatter to extract metadata."""
+    skill_md = skill_path / 'SKILL.md'
+    if not skill_md.exists():
+        raise ValueError(f"No SKILL.md found in {skill_path}")
+
+    content = skill_md.read_text()
+
+    # Extract YAML frontmatter between --- markers
+    match = re.match(r'^---\n(.*?)\n---', content, re.DOTALL)
+    if not match:
+        raise ValueError("No YAML frontmatter found in SKILL.md")
+
+    frontmatter = match.group(1)
+    metadata = yaml.safe_load(frontmatter)
+
+    return metadata or {}
+
+
+def load_skills_json() -> dict:
+    """Load skills.json or create empty structure."""
+    if SKILLS_JSON.exists():
+        try:
+            return json.loads(SKILLS_JSON.read_text())
+        except:
+            pass
+    return {"installed": {}}
+
+
+def save_skills_json(data: dict):
+    """Save skills.json."""
+    SKILLS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    SKILLS_JSON.write_text(json.dumps(data, indent=2))
+
+
+def load_settings_json() -> dict:
+    """Load settings.json."""
+    if SETTINGS_JSON.exists():
+        return json.loads(SETTINGS_JSON.read_text())
+    return {}
+
+
+def save_settings_json(data: dict):
+    """Save settings.json."""
+    SETTINGS_JSON.write_text(json.dumps(data, indent=2))
+
+
+def parse_version(version_str: str) -> tuple:
+    """Parse version string to tuple for comparison."""
+    parts = version_str.replace('>=', '').replace('>', '').replace('<=', '').replace('<', '').strip()
+    return tuple(int(x) for x in parts.split('.'))
+
+
+def check_dependencies(metadata: dict, skills: dict) -> list:
+    """Check if dependencies are met. Returns list of unmet deps."""
+    deps = metadata.get('dependencies', [])
+    if not deps:
+        return []
+
+    unmet = []
+    installed = skills.get('installed', {})
+
+    for dep in deps:
+        # Parse dependency like "core-utils>=1.0.0"
+        match = re.match(r'([a-zA-Z0-9_-]+)(>=|>|<=|<|==)?(.+)?', dep)
+        if not match:
+            continue
+
+        name, op, version = match.groups()
+
+        if name not in installed:
+            unmet.append(dep)
+        elif version and op:
+            installed_ver = parse_version(installed[name].get('version', '0.0.0'))
+            required_ver = parse_version(version)
+
+            if op == '>=' and installed_ver < required_ver:
+                unmet.append(dep)
+            elif op == '>' and installed_ver <= required_ver:
+                unmet.append(dep)
+            elif op == '==' and installed_ver != required_ver:
+                unmet.append(dep)
+
+    return unmet
+
+
+def find_migrations(skill_path: Path, from_version: str, to_version: str) -> list:
+    """Find migration scripts to run between versions."""
+    migrations_dir = skill_path / 'migrations'
+    if not migrations_dir.exists():
+        return []
+
+    from_ver = parse_version(from_version)
+    to_ver = parse_version(to_version)
+
+    migrations = []
+    for f in sorted(migrations_dir.glob('v*_to_v*.py')):
+        # Parse filename like v1.0.0_to_v1.1.0.py
+        match = re.match(r'v(.+)_to_v(.+)\.py', f.name)
+        if match:
+            mig_from = parse_version(match.group(1))
+            mig_to = parse_version(match.group(2))
+
+            # Include if migration is within our upgrade range
+            if mig_from >= from_ver and mig_to <= to_ver:
+                migrations.append(f)
+
+    return migrations
+
+
+def run_migration(migration_path: Path) -> bool:
+    """Run a migration script."""
+    import subprocess
+    result = subprocess.run([sys.executable, str(migration_path)], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"    Migration failed: {result.stderr}")
+        return False
+    return True
+
+
+def copy_files(skill_path: Path, metadata: dict) -> list:
+    """Copy skill files to ~/.claude/. Returns list of installed files."""
+    installs = metadata.get('installs', {})
+    installed_files = []
+
+    for category, files in installs.items():
+        if not isinstance(files, list):
+            continue
+
+        dest_dir = CLAUDE_DIR / category
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        for filename in files:
+            src = skill_path / category / filename
+            dest = dest_dir / filename
+
+            if src.exists():
+                shutil.copy2(src, dest)
+                # Make executable if in bin or hooks
+                if category in ('bin', 'hooks'):
+                    dest.chmod(dest.stat().st_mode | 0o111)
+                installed_files.append(f"{category}/{filename}")
+                print(f"  \u2713 Copied {category}/{filename}")
+            else:
+                print(f"  \u2717 Missing {category}/{filename}")
+
+    return installed_files
+
+
+def register_hooks(metadata: dict):
+    """Register hooks in settings.json."""
+    hooks_config = metadata.get('hooks', {})
+    if not hooks_config:
+        return
+
+    settings = load_settings_json()
+    if 'hooks' not in settings:
+        settings['hooks'] = {}
+
+    for hook_type, config in hooks_config.items():
+        if not isinstance(config, dict):
+            continue
+
+        command = config.get('command', '')
+        timeout = int(config.get('timeout', 30))
+        matcher = config.get('matcher')
+
+        if not command:
+            continue
+
+        hook_entry = {
+            "hooks": [{
+                "type": "command",
+                "command": command,
+                "timeout": timeout
+            }]
+        }
+
+        if matcher:
+            hook_entry["matcher"] = matcher
+
+        if hook_type not in settings['hooks']:
+            settings['hooks'][hook_type] = []
+
+        # Check if already registered (by command)
+        existing = settings['hooks'][hook_type]
+        already_registered = any(
+            h.get('hooks', [{}])[0].get('command') == command
+            for h in existing if isinstance(h, dict)
+        )
+
+        if not already_registered:
+            settings['hooks'][hook_type].append(hook_entry)
+            print(f"  \u2713 Registered {hook_type} hook")
+
+    save_settings_json(settings)
+
+
+def cmd_install(path: str):
+    """Install a skill from source path."""
+    skill_path = Path(path).expanduser().resolve()
+
+    if not skill_path.exists():
+        print(f"Error: Path not found: {skill_path}")
+        sys.exit(1)
+
+    try:
+        metadata = parse_skill_md(skill_path)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    name = metadata.get('name', skill_path.name)
+    version = metadata.get('version', '0.0.0')
+
+    # Check dependencies
+    skills = load_skills_json()
+    unmet = check_dependencies(metadata, skills)
+    if unmet:
+        print(f"Error: Missing dependencies:")
+        for dep in unmet:
+            print(f"  - {dep}")
+        print(f"\nInstall dependencies first.")
+        sys.exit(1)
+
+    print(f"Installing {name} v{version}...")
+
+    # Copy files
+    installed_files = copy_files(skill_path, metadata)
+
+    # Register hooks
+    register_hooks(metadata)
+
+    # Update skills.json
+    skills['installed'][name] = {
+        'version': version,
+        'source': str(skill_path),
+        'installed_at': datetime.now().isoformat(),
+        'files': installed_files,
+        'migrations_run': []
+    }
+    save_skills_json(skills)
+
+    print(f"  \u2713 Installed {name} v{version}")
+
+
+def cmd_upgrade(name: str):
+    """Upgrade an installed skill."""
+    skills = load_skills_json()
+
+    if name not in skills.get('installed', {}):
+        print(f"Error: Skill '{name}' is not installed")
+        print(f"Use 'skill list' to see installed skills")
+        sys.exit(1)
+
+    installed = skills['installed'][name]
+    source_path = Path(installed['source'])
+
+    if not source_path.exists():
+        print(f"Error: Source path no longer exists: {source_path}")
+        sys.exit(1)
+
+    try:
+        metadata = parse_skill_md(source_path)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    old_version = installed['version']
+    new_version = metadata.get('version', '0.0.0')
+
+    if parse_version(new_version) <= parse_version(old_version):
+        print(f"{name} is already at v{old_version} (source: v{new_version})")
+        return
+
+    print(f"Upgrading {name} {old_version} \u2192 {new_version}...")
+
+    # Run migrations
+    migrations = find_migrations(source_path, old_version, new_version)
+    migrations_run = installed.get('migrations_run', [])
+
+    for mig in migrations:
+        mig_name = mig.stem
+        if mig_name not in migrations_run:
+            print(f"  \u2713 Running migration {mig_name}")
+            if run_migration(mig):
+                migrations_run.append(mig_name)
+            else:
+                print(f"  \u2717 Migration failed, aborting upgrade")
+                sys.exit(1)
+
+    # Copy files
+    installed_files = copy_files(source_path, metadata)
+
+    # Register any new hooks
+    register_hooks(metadata)
+
+    # Update skills.json
+    skills['installed'][name] = {
+        'version': new_version,
+        'source': str(source_path),
+        'installed_at': datetime.now().isoformat(),
+        'files': installed_files,
+        'migrations_run': migrations_run
+    }
+    save_skills_json(skills)
+
+    print(f"  \u2713 Upgraded {name} to v{new_version}")
+
+    # Check dependents
+    for other_name, other_info in skills['installed'].items():
+        if other_name == name:
+            continue
+        other_source = Path(other_info['source'])
+        if other_source.exists():
+            try:
+                other_meta = parse_skill_md(other_source)
+                for dep in other_meta.get('dependencies', []):
+                    if dep.startswith(name):
+                        print(f"\nNote: {other_name} depends on {name}")
+            except:
+                pass
+
+
+def cmd_list():
+    """List installed skills."""
+    skills = load_skills_json()
+    installed = skills.get('installed', {})
+
+    if not installed:
+        print("No skills installed")
+        print("\nInstall with: skill install <path>")
+        return
+
+    print("Installed skills:")
+    for name, info in sorted(installed.items()):
+        version = info.get('version', '?')
+        source = info.get('source', '?')
+        # Shorten home path
+        source = source.replace(str(Path.home()), '~')
+        print(f"  {name:<15} {version:<10} {source}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+
+    if cmd == 'install':
+        if len(sys.argv) < 3:
+            print("Usage: skill install <path>")
+            sys.exit(1)
+        cmd_install(sys.argv[2])
+
+    elif cmd == 'upgrade':
+        if len(sys.argv) < 3:
+            print("Usage: skill upgrade <name>")
+            sys.exit(1)
+        cmd_upgrade(sys.argv[2])
+
+    elif cmd == 'list':
+        cmd_list()
+
+    else:
+        print(f"Unknown command: {cmd}")
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

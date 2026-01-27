@@ -21,3 +21,4 @@ ENV/
 # Test data
 *.jsonl
 recall-index.json
+.claude/

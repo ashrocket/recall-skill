@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 SessionEnd hook: Index session data for /recall.
-Creates a unified index with user messages, commands, and failure patterns.
+
+Uses tiered storage:
+- recall-index.json: Lightweight summaries (always under token limit)
+- recall-sessions/: Full session details stored separately
+
+This ensures the main index stays readable while preserving all data.
 """
 
 import sys
@@ -11,9 +16,19 @@ from pathlib import Path
 from datetime import datetime
 import re
 
+# Index size limits
+MAX_SESSIONS_IN_INDEX = 50  # Keep summaries for last 50 sessions
+MAX_INDEX_SIZE_KB = 60      # Target max size for main index
+
+
 def get_project_folder(cwd: str) -> str:
     """Convert working directory to Claude's project folder naming convention."""
     return cwd.replace('/', '-')
+
+
+def get_session_details_dir(project_folder: str) -> Path:
+    """Get the directory for storing session detail files."""
+    return Path.home() / '.claude' / 'projects' / project_folder / 'recall-sessions'
 
 def find_current_session(project_folder: str) -> Path:
     """Find the most recent session file."""
@@ -62,7 +77,7 @@ def parse_session_full(session_file: Path) -> dict:
                         if isinstance(content, str) and content and not content.startswith('<'):
                             result['user_messages'].append({
                                 'index': i,
-                                'content': content[:500],
+                                'content': content[:200],  # Reduced from 500
                                 'timestamp': obj.get('timestamp', '')
                             })
                             # Extract potential topics (capitalized words, technical terms)
@@ -87,7 +102,7 @@ def parse_session_full(session_file: Path) -> dict:
                                             result['commands'].append({
                                                 'index': i,
                                                 'tool_id': block.get('id', ''),
-                                                'command': command[:300]
+                                                'command': command[:150]  # Reduced from 300
                                             })
 
                                     # Track Skill invocations
@@ -117,7 +132,7 @@ def parse_session_full(session_file: Path) -> dict:
                                         # Find the command that caused this
                                         for cmd in result['commands']:
                                             if cmd.get('tool_id') == tool_id:
-                                                error_msg = tool_content[:500] if isinstance(tool_content, str) else str(tool_content)[:500]
+                                                error_msg = tool_content[:200] if isinstance(tool_content, str) else str(tool_content)[:200]  # Reduced from 500
                                                 result['failures'].append({
                                                     'command': cmd['command'],
                                                     'error': error_msg,
@@ -195,10 +210,114 @@ def load_index(project_folder: str) -> dict:
         }
     }
 
+def save_session_details(project_folder: str, session_id: str, details: dict):
+    """Save full session details to a separate file.
+
+    This preserves all data while keeping the main index lightweight.
+    """
+    details_dir = get_session_details_dir(project_folder)
+    details_dir.mkdir(parents=True, exist_ok=True)
+
+    details_file = details_dir / f"{session_id}.json"
+    with open(details_file, 'w') as f:
+        json.dump(details, f, indent=2, default=str)
+
+
+def load_session_details(project_folder: str, session_id: str) -> dict:
+    """Load full session details from separate file."""
+    details_file = get_session_details_dir(project_folder) / f"{session_id}.json"
+    if details_file.exists():
+        try:
+            with open(details_file, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return None
+
+
+def create_session_summary(session_data: dict) -> dict:
+    """Create a lightweight summary for the main index.
+
+    Only includes essential info - full details in separate file.
+    """
+    # Extract first 3 user messages for summary text
+    first_msgs = [m['content'][:80] for m in session_data.get('user_messages', [])[:3]]
+    summary_text = ' | '.join(first_msgs)
+
+    return {
+        'date': session_data['date'],
+        'summary': summary_text[:200],  # Keep summary short
+        'message_count': len(session_data.get('user_messages', [])),
+        'command_count': len(session_data.get('commands', [])),
+        'failure_count': len(session_data.get('failures', [])),
+        'skill_count': len(session_data.get('skills_used', [])),
+        'topics': session_data.get('topics', [])[:10],  # Limit topics
+        'has_details': True  # Flag indicating detail file exists
+    }
+
+
+def prune_index(index: dict, max_sessions: int = MAX_SESSIONS_IN_INDEX, max_index_size_kb: int = MAX_INDEX_SIZE_KB):
+    """Prune old session summaries from index to keep under size limits.
+
+    Note: This only removes summaries from index, detail files are preserved.
+    """
+    sessions = index.get('sessions', {})
+    if not sessions:
+        return index
+
+    # Sort sessions by date, newest first
+    sorted_sessions = sorted(
+        sessions.items(),
+        key=lambda x: x[1].get('date', ''),
+        reverse=True
+    )
+
+    # First pass: enforce max sessions limit
+    if len(sorted_sessions) > max_sessions:
+        keep_sessions = dict(sorted_sessions[:max_sessions])
+        index['sessions'] = keep_sessions
+        sorted_sessions = list(keep_sessions.items())
+
+    # Second pass: check size and prune further if needed
+    index_size = len(json.dumps(index, default=str))
+    target_size = max_index_size_kb * 1024
+
+    while index_size > target_size and len(sorted_sessions) > 10:
+        # Remove oldest session from index (detail file preserved)
+        oldest_id = sorted_sessions[-1][0]
+        del index['sessions'][oldest_id]
+        sorted_sessions = sorted_sessions[:-1]
+        index_size = len(json.dumps(index, default=str))
+
+    return index
+
+
+def cleanup_old_detail_files(project_folder: str, keep_count: int = 100):
+    """Remove oldest detail files to prevent unbounded growth.
+
+    Keeps the most recent `keep_count` session detail files.
+    """
+    details_dir = get_session_details_dir(project_folder)
+    if not details_dir.exists():
+        return
+
+    detail_files = sorted(details_dir.glob('*.json'), key=lambda f: f.stat().st_mtime, reverse=True)
+
+    # Remove files beyond keep_count
+    for f in detail_files[keep_count:]:
+        try:
+            f.unlink()
+        except:
+            pass
+
+
 def save_index(project_folder: str, index: dict):
-    """Save index to disk."""
+    """Save index to disk, pruning if necessary."""
     index_dir = Path.home() / '.claude' / 'projects' / project_folder
     index_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prune before saving to keep size manageable
+    index = prune_index(index)
 
     index_file = index_dir / 'recall-index.json'
     with open(index_file, 'w') as f:
@@ -217,33 +336,34 @@ def main():
         print(f"No session found for project: {cwd}", file=sys.stderr)
         sys.exit(0)
 
-    # Parse session
+    # Parse session (full data)
     session_data = parse_session_full(session_file)
-
-    # Load and update index
-    index = load_index(project_folder)
-
     session_id = session_data['session_id']
 
-    # Add/update session in index
-    index['sessions'][session_id] = {
+    # === TIERED STORAGE ===
+    # 1. Save full details to separate file (preserves all data)
+    full_details = {
+        'session_id': session_id,
         'date': session_data['date'],
         'summary': session_data['summary'],
-        'message_count': len(session_data['user_messages']),
-        'command_count': len(session_data['commands']),
-        'failure_count': len(session_data['failures']),
-        'skill_count': len(session_data['skills_used']),
         'topics': session_data['topics'],
-        'user_messages': session_data['user_messages'][:20],  # Keep first 20
-        'failures': session_data['failures'][:10],  # Keep first 10 failures
-        'skills_used': session_data['skills_used'][:20]  # Keep first 20 skill uses
+        'user_messages': session_data['user_messages'][:30],  # Full content, up to 30
+        'commands': session_data['commands'][:50],  # Up to 50 commands
+        'failures': session_data['failures'][:20],  # Up to 20 failures
+        'failure_patterns': session_data['failure_patterns'],
+        'skills_used': session_data['skills_used'][:30]
     }
+    save_session_details(project_folder, session_id, full_details)
+
+    # 2. Store only lightweight summary in main index
+    index = load_index(project_folder)
+    index['sessions'][session_id] = create_session_summary(session_data)
 
     # Ensure usage section exists (for older indices)
     if 'usage' not in index:
         index['usage'] = {'skills': {}, 'learnings_shown': {}}
 
-    # Update skill usage stats
+    # Update skill usage stats (kept in main index for quick access)
     for skill_use in session_data['skills_used']:
         skill_name = skill_use['skill']
         if skill_name not in index['usage']['skills']:
@@ -260,7 +380,7 @@ def main():
             # Keep only last 10 sessions per skill
             index['usage']['skills'][skill_name]['sessions'] = index['usage']['skills'][skill_name]['sessions'][-10:]
 
-    # Merge failure patterns into global patterns
+    # Merge failure patterns into global patterns (kept in index for quick failures view)
     for pattern, failures in session_data['failure_patterns'].items():
         if pattern not in index['failure_patterns']:
             index['failure_patterns'][pattern] = []
@@ -268,11 +388,16 @@ def main():
             f['session_id'] = session_id
             f['date'] = session_data['date']
             index['failure_patterns'][pattern].append(f)
-        # Keep only last 20 of each pattern
-        index['failure_patterns'][pattern] = index['failure_patterns'][pattern][-20:]
+        # Keep only last 15 of each pattern in index
+        index['failure_patterns'][pattern] = index['failure_patterns'][pattern][-15:]
 
     # Save updated index
     save_index(project_folder, index)
+
+    # Periodic cleanup of old detail files (every ~10 sessions)
+    import random
+    if random.random() < 0.1:
+        cleanup_old_detail_files(project_folder)
 
     skills_msg = f", {len(session_data['skills_used'])} skills" if session_data['skills_used'] else ""
     print(f"Indexed session {session_id[:8]}... ({len(session_data['user_messages'])} messages, {len(session_data['commands'])} commands, {len(session_data['failures'])} failures{skills_msg})")
