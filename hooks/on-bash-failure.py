@@ -136,7 +136,6 @@ No matching SOP found. Try:
 """
 
             output = {
-                "decision": "allow",
                 "hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
                     "additionalContext": feedback
@@ -164,7 +163,6 @@ Save as SOP? Reply: "save global", "save project", or continue working
 """
 
                 output = {
-                    "decision": "allow",
                     "hookSpecificOutput": {
                         "hookEventName": "PostToolUse",
                         "additionalContext": feedback
@@ -172,12 +170,12 @@ Save as SOP? Reply: "save global", "save project", or continue working
                 }
                 print(json.dumps(output))
             else:
-                # No state, just allow
-                print(json.dumps({"decision": "allow"}))
+                # No state, nothing to do
+                sys.exit(0)
 
     except Exception:
         # Fail silently - don't crash the hook
-        print(json.dumps({"decision": "allow"}))
+        sys.exit(0)
 
 
 if __name__ == "__main__":
