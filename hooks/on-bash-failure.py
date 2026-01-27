@@ -80,35 +80,36 @@ def main():
     except (json.JSONDecodeError, IOError):
         sys.exit(0)
 
-    tool_name = hook_input.get("tool_name", "")
-    tool_input = hook_input.get("tool_input", {})
-    tool_response = hook_input.get("tool_response", {})
+    try:
+        tool_name = hook_input.get("tool_name", "")
+        tool_input = hook_input.get("tool_input", {})
+        tool_response = hook_input.get("tool_response", {})
 
-    # Only process Bash
-    if tool_name != "Bash":
-        sys.exit(0)
+        # Only process Bash
+        if tool_name != "Bash":
+            sys.exit(0)
 
-    command = tool_input.get("command", "")
-    exit_code = tool_response.get("exitCode", 0)
-    stderr = tool_response.get("stderr", "")
-    stdout = tool_response.get("stdout", "")
+        command = tool_input.get("command", "") or ""
+        exit_code = tool_response.get("exitCode", 0) or 0
+        stderr = tool_response.get("stderr", "") or ""  # Handle None
+        stdout = tool_response.get("stdout", "") or ""  # Handle None
 
-    sops = load_sops()
+        sops = load_sops()
 
-    # Check if this is a failure
-    is_error = exit_code != 0 and stderr
+        # Check if this is a failure
+        is_error = exit_code != 0 and stderr
 
-    if is_error:
-        # Job 1: Show SOP on failure
-        error_msg = stderr if stderr else stdout
-        match = match_error(error_msg, sops)
+        if is_error:
+            # Job 1: Show SOP on failure
+            error_msg = stderr if stderr else stdout
+            match = match_error(error_msg, sops)
 
-        if match:
-            name, sop = match
-            sop_text = format_sop(name, sop)
-            write_state(name, command, error_msg)
+            if match:
+                name, sop = match
+                sop_text = format_sop(name, sop)
+                write_state(name, command, error_msg)
 
-            feedback = f"""
+                feedback = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️  BASH FAILED: {name}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -119,9 +120,9 @@ def main():
 ESCALATION: 1st fail → try SOP | 2nd → alternatives | 3rd → ASK USER
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
-        else:
-            write_state("UNKNOWN", command, error_msg)
-            feedback = f"""
+            else:
+                write_state("UNKNOWN", command, error_msg)
+                feedback = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️  BASH FAILED: UNKNOWN ERROR TYPE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -134,23 +135,23 @@ No matching SOP found. Try:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-        output = {
-            "decision": "allow",
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": feedback
+            output = {
+                "decision": "allow",
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": feedback
+                }
             }
-        }
-        print(json.dumps(output))
+            print(json.dumps(output))
 
-    else:
-        # Job 2: Check if this resolves a previous failure
-        state = read_state()
+        else:
+            # Job 2: Check if this resolves a previous failure
+            state = read_state()
 
-        if state:
-            clear_state()
+            if state:
+                clear_state()
 
-            feedback = f"""
+                feedback = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ That command worked after {state['error_type']}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -162,17 +163,21 @@ Save as SOP? Reply: "save global", "save project", or continue working
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-            output = {
-                "decision": "allow",
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": feedback
+                output = {
+                    "decision": "allow",
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": feedback
+                    }
                 }
-            }
-            print(json.dumps(output))
-        else:
-            # No state, just allow
-            print(json.dumps({"decision": "allow"}))
+                print(json.dumps(output))
+            else:
+                # No state, just allow
+                print(json.dumps({"decision": "allow"}))
+
+    except Exception:
+        # Fail silently - don't crash the hook
+        print(json.dumps({"decision": "allow"}))
 
 
 if __name__ == "__main__":
