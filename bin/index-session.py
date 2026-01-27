@@ -394,6 +394,37 @@ def main():
     # Save updated index
     save_index(project_folder, index)
 
+    # === KNOWLEDGE EXTRACTION (v2) ===
+    try:
+        # Prepare session data for extraction
+        extraction_data = {
+            'session_id': session_id,
+            'summary': session_data['summary'],
+            'user_messages': session_data['user_messages'],
+            'commands': session_data['commands'],
+            'failures': session_data['failures']
+        }
+
+        # Run local heuristic extraction
+        extract_script = Path(__file__).parent / 'extract-knowledge.py'
+        if extract_script.exists():
+            import subprocess
+            result = subprocess.run(
+                ['python3', str(extract_script), '-', project_folder],
+                input=json.dumps(extraction_data),
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                extract_result = json.loads(result.stdout)
+                proposals = extract_result.get('proposals_added', 0)
+                if proposals > 0:
+                    print(f"  Proposed {proposals} learnings (run /recall learn to review)")
+    except Exception as e:
+        # Don't fail indexing if extraction fails
+        pass
+
     # Periodic cleanup of old detail files (every ~10 sessions)
     import random
     if random.random() < 0.1:
