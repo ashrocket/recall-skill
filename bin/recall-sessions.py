@@ -729,6 +729,17 @@ def main():
             reset_index(index, project_folder)
         elif cmd_name == 'cleanup':
             show_cleanup_analysis(index, sessions, project_folder)
+        elif cmd_name == 'learn':
+            # Run the learn script
+            learn_script = Path(__file__).parent / 'recall-learn.py'
+            if learn_script.exists():
+                import subprocess
+                args = ['python3', str(learn_script)]
+                if cmd_arg:
+                    args.append(cmd_arg)
+                subprocess.run(args)
+            else:
+                print("Learn script not found. Check installation.")
         else:
             # Search
             search_sessions(command, index, sessions, project_folder)
