@@ -142,6 +142,16 @@ if [ "$INSTALL_RECALL" = true ]; then
     cp "$SCRIPT_DIR/bin/index-session.py" "$CLAUDE_DIR/bin/"
     cp "$SCRIPT_DIR/bin/session-context.py" "$CLAUDE_DIR/bin/"
     cp "$SCRIPT_DIR/commands/recall.md" "$CLAUDE_DIR/commands/"
+
+    # Lib directory (new in v2)
+    mkdir -p "$CLAUDE_DIR/lib"
+    ln -sf "$SCRIPT_DIR/lib/knowledge.py" "$CLAUDE_DIR/lib/"
+    ln -sf "$SCRIPT_DIR/lib/pending.py" "$CLAUDE_DIR/lib/"
+    ln -sf "$SCRIPT_DIR/lib/__init__.py" "$CLAUDE_DIR/lib/" 2>/dev/null || touch "$CLAUDE_DIR/lib/__init__.py"
+
+    # New v2 scripts
+    ln -sf "$SCRIPT_DIR/bin/extract-knowledge.py" "$CLAUDE_DIR/bin/"
+    ln -sf "$SCRIPT_DIR/bin/recall-learn.py" "$CLAUDE_DIR/bin/"
 fi
 
 # Install failures skill
