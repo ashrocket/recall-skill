@@ -1,127 +1,165 @@
 #!/usr/bin/env python3
 """
-CLAUDE.md knowledge management utilities.
-Handles reading, writing, and merging knowledge entries.
+Knowledge management library for the recall system.
+Handles loading, saving, and formatting learnings from recall-index.json.
 """
 
+import json
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
-# Category headers in CLAUDE.md
-CATEGORIES = ['Credentials', 'Tools', 'Gotchas', 'Workflows']
 
-GLOBAL_CLAUDE_MD = Path.home() / '.claude' / 'CLAUDE.md'
+GLOBAL_CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
 
 
-def get_project_claude_md() -> Path:
-    """Find project CLAUDE.md path. Creates .claude/ in git root or cwd."""
+def get_project_folder() -> str:
+    """Get current project folder name."""
+    cwd = os.environ.get('CLAUDE_PROJECT_DIR') or os.getcwd()
+    return cwd.replace('/', '-')
+
+
+def get_project_claude_md() -> Optional[Path]:
+    """Find project-level CLAUDE.md by walking up from cwd."""
     cwd = Path.cwd()
     for parent in [cwd] + list(cwd.parents):
-        candidate = parent / '.claude' / 'CLAUDE.md'
-        if candidate.parent.exists():  # .claude dir exists
+        candidate = parent / "CLAUDE.md"
+        if candidate.exists():
             return candidate
-        # Also check for project root markers
-        if (parent / '.git').exists():
-            return parent / '.claude' / 'CLAUDE.md'
-    return Path.cwd() / '.claude' / 'CLAUDE.md'
+    return None
 
 
-def load_claude_md(path: Path) -> dict:
-    """Load CLAUDE.md into structured dict by category."""
-    result = {cat: [] for cat in CATEGORIES}
-
-    if not path.exists():
-        return result
-
-    try:
-        content = path.read_text()
-    except IOError:
-        return result
-
-    current_category = None
-
-    for line in content.split('\n'):
-        # Check for category header
-        for cat in CATEGORIES:
-            if line.strip().startswith(f'## {cat}'):
-                current_category = cat
-                break
-        else:
-            # Not a header, add to current category
-            if current_category and line.strip().startswith('- '):
-                result[current_category].append(line.strip()[2:])
-
-    return result
+def get_index_path(project_folder: str = None) -> Path:
+    """Get recall-index.json path for a project."""
+    if not project_folder:
+        project_folder = get_project_folder()
+    return Path.home() / '.claude' / 'projects' / project_folder / 'recall-index.json'
 
 
-def save_claude_md(path: Path, knowledge: dict, header: str = "# Knowledge"):
-    """Save structured knowledge dict to CLAUDE.md."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    lines = [header, '']
-
-    for cat in CATEGORIES:
-        items = knowledge.get(cat, [])
-        if items:
-            lines.append(f'## {cat}')
-            for item in items:
-                lines.append(f'- {item}')
-            lines.append('')
-
-    path.write_text('\n'.join(lines))
-
-
-def add_knowledge(item: str, category: str, scope: str = 'global') -> bool:
-    """Add a knowledge item to the appropriate CLAUDE.md.
-
-    Args:
-        item: The knowledge entry text
-        category: One of CATEGORIES
-        scope: 'global' for ~/.claude/CLAUDE.md, 'project' for .claude/CLAUDE.md
-    """
-    if category not in CATEGORIES:
-        return False
-
-    if scope not in ('global', 'project'):
-        return False
-
-    if scope == 'global':
-        path = GLOBAL_CLAUDE_MD
-        header = '# Global Knowledge'
-    else:
-        path = get_project_claude_md()
-        header = '# Project Knowledge'
-
-    knowledge = load_claude_md(path)
-
-    # Avoid duplicates
-    if item not in knowledge[category]:
-        knowledge[category].append(item)
-        save_claude_md(path, knowledge, header)
-
-    return True
+def load_index(project_folder: str = None) -> dict:
+    """Load recall index."""
+    index_file = get_index_path(project_folder)
+    if index_file.exists():
+        try:
+            with open(index_file, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {
+        'version': 2,
+        'project': project_folder or get_project_folder(),
+        'sessions': {},
+        'failure_patterns': {},
+        'learnings': [],
+        'pending_learnings': [],
+        'usage': {'skills': {}, 'learnings_shown': {}}
+    }
 
 
-def get_all_knowledge() -> dict:
-    """Load and merge global + project knowledge."""
-    global_k = load_claude_md(GLOBAL_CLAUDE_MD)
-    project_k = load_claude_md(get_project_claude_md())
+def save_index(index: dict, project_folder: str = None):
+    """Save recall index."""
+    if not project_folder:
+        project_folder = get_project_folder()
+    index_file = get_index_path(project_folder)
+    index_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(index_file, 'w') as f:
+        json.dump(index, f, indent=2, default=str)
 
-    # Merge (project items come after global)
-    merged = {}
-    for cat in CATEGORIES:
-        merged[cat] = global_k.get(cat, []) + project_k.get(cat, [])
 
-    return merged
+def get_learnings(project_folder: str = None) -> list:
+    """Get approved learnings from index."""
+    index = load_index(project_folder)
+    return index.get('learnings', [])
+
+
+def get_pending_learnings(project_folder: str = None) -> list:
+    """Get pending learnings awaiting approval."""
+    index = load_index(project_folder)
+    return index.get('pending_learnings', [])
+
+
+def add_pending_learning(learning: dict, project_folder: str = None):
+    """Add a learning to the pending queue."""
+    index = load_index(project_folder)
+    if 'pending_learnings' not in index:
+        index['pending_learnings'] = []
+
+    # Check for duplicates by title
+    existing_titles = {l.get('title', '') for l in index['pending_learnings']}
+    approved_titles = {l.get('title', '') for l in index.get('learnings', [])}
+
+    if learning.get('title') not in existing_titles and learning.get('title') not in approved_titles:
+        index['pending_learnings'].append(learning)
+        save_index(index, project_folder)
+        return True
+    return False
+
+
+def approve_learning(index: int, project_folder: str = None) -> Optional[dict]:
+    """Move a pending learning to approved. Returns the learning or None."""
+    idx = load_index(project_folder)
+    pending = idx.get('pending_learnings', [])
+
+    if 0 <= index < len(pending):
+        learning = pending.pop(index)
+        if 'learnings' not in idx:
+            idx['learnings'] = []
+        idx['learnings'].append(learning)
+        save_index(idx, project_folder)
+        return learning
+    return None
+
+
+def reject_learning(index: int, project_folder: str = None) -> Optional[dict]:
+    """Remove a pending learning. Returns the removed learning or None."""
+    idx = load_index(project_folder)
+    pending = idx.get('pending_learnings', [])
+
+    if 0 <= index < len(pending):
+        learning = pending.pop(index)
+        save_index(idx, project_folder)
+        return learning
+    return None
+
+
+def approve_all_pending(project_folder: str = None) -> int:
+    """Approve all pending learnings. Returns count approved."""
+    idx = load_index(project_folder)
+    pending = idx.get('pending_learnings', [])
+
+    if not pending:
+        return 0
+
+    if 'learnings' not in idx:
+        idx['learnings'] = []
+
+    count = len(pending)
+    idx['learnings'].extend(pending)
+    idx['pending_learnings'] = []
+    save_index(idx, project_folder)
+    return count
+
+
+def get_all_knowledge(project_folder: str = None) -> dict:
+    """Get all knowledge organized by category."""
+    learnings = get_learnings(project_folder)
+    categories = {}
+
+    for learning in learnings:
+        if isinstance(learning, dict):
+            cat = learning.get('category', 'general')
+            if cat not in categories:
+                categories[cat] = []
+            title = learning.get('title', 'Unknown')
+            solution = learning.get('solution', '')
+            categories[cat].append(f"{title}: {solution}" if solution else title)
+
+    return categories
 
 
 def format_knowledge_summary(knowledge: dict) -> str:
-    """Format knowledge for SessionStart display."""
+    """Format knowledge for session start display."""
     lines = []
-    for cat in CATEGORIES:
-        items = knowledge.get(cat, [])
-        if items:
-            lines.append(f"  - {cat}: {len(items)} items")
-    return '\n'.join(lines) if lines else "  (none)"
+    for cat, items in sorted(knowledge.items()):
+        lines.append(f"  [{cat}] {len(items)} learnings")
+    return '\n'.join(lines) if lines else "  No learnings yet"

@@ -1,185 +1,154 @@
 #!/usr/bin/env python3
 """
-Local heuristic knowledge extractor.
-Extracts paths, credentials, tools from session data without API calls.
+Heuristic knowledge extraction from session data.
+Called by index-session.py at the end of each session.
+
+Reads session data from stdin (JSON), proposes learnings based on patterns:
+- Repeated failures with the same error category -> propose avoidance strategy
+- Commands that failed then succeeded -> propose the working approach
+- Tool usage patterns -> propose best practices
+
+Usage:
+  echo '{"session_id": "...", ...}' | python3 extract-knowledge.py - <project_folder>
 """
 
-import re
-import sys
 import json
+import sys
 from pathlib import Path
+from collections import Counter
 
 # Add lib to path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'lib'))
+LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
 
-from pending import add_pending
-
-
-def extract_credential_paths(text: str) -> list:
-    """Extract likely credential file paths."""
-    patterns = [
-        r'~/\.[a-zA-Z0-9_-]*(?:cred|token|key|pass|auth|secret)[a-zA-Z0-9_-]*',
-        r'~/\.[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]*(?:cred|token|key|pass|auth)[a-zA-Z0-9_.-]*',
-        r'~/.(?:arango|waystar|trillium|bb)[a-zA-Z0-9_-]*',
-    ]
-
-    found = set()
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        found.update(matches)
-
-    return list(found)
+from knowledge import add_pending_learning
 
 
-def extract_tool_paths(text: str, successful_commands: list) -> list:
-    """Extract tool paths from successful commands."""
-    tools = set()
-
-    # Look for paths in ~/code/ that are scripts/tools
-    pattern = r'~/code/[a-zA-Z0-9_-]+/(?:bin|scripts?|tools?)/[a-zA-Z0-9_.-]+'
-
-    for cmd in successful_commands:
-        matches = re.findall(pattern, cmd)
-        tools.update(matches)
-
-    # Also look for explicit tool mentions
-    tool_pattern = r'~/code/[a-zA-Z0-9_-]+/[a-zA-Z0-9_/-]+\.(?:sh|py|js)'
-    for cmd in successful_commands:
-        matches = re.findall(tool_pattern, cmd)
-        tools.update(matches)
-
-    return list(tools)
-
-
-def extract_env_files(text: str) -> list:
-    """Extract .env and environment file paths."""
-    patterns = [
-        r'~/\.[a-zA-Z0-9_-]*env[a-zA-Z0-9_/-]*',
-        r'~/.kureenv/[a-zA-Z0-9_.-]+',
-    ]
-
-    found = set()
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        found.update(matches)
-
-    return list(found)
-
-
-def is_complex_session(session_data: dict) -> bool:
-    """Determine if session needs Claude API analysis."""
-    failures = session_data.get('failures', [])
-    messages = session_data.get('user_messages', [])
+def extract_failure_resolution_pairs(session_data: dict) -> list:
+    """Find failures followed by successful commands with similar patterns."""
     commands = session_data.get('commands', [])
+    failures = session_data.get('failures', [])
 
-    # 3+ failures
-    if len(failures) >= 3:
-        return True
+    if not failures or not commands:
+        return []
 
-    # Debugging keywords
-    debug_keywords = ['why', 'not working', 'figured out', 'root cause',
-                      'the problem', 'issue was', 'fixed by', 'solution']
-    all_text = ' '.join(m.get('content', '') for m in messages).lower()
-    if any(kw in all_text for kw in debug_keywords):
-        return True
-
-    # Long session with many tool calls
-    if len(messages) >= 10 and len(commands) >= 15:
-        return True
-
-    return False
-
-
-def extract_from_session(session_data: dict, project_folder: str) -> tuple:
-    """Extract knowledge proposals from session data."""
     proposals = []
+    failed_commands = {f.get('command', '')[:50] for f in failures}
 
-    session_id = session_data.get('session_id', 'unknown')
-    summary = session_data.get('summary', '')[:100]
+    # Look for commands that are similar to failed ones but appeared later
+    for failure in failures:
+        failed_cmd = failure.get('command', '')
+        failed_prefix = failed_cmd.split()[0] if failed_cmd else ''
+        failed_index = failure.get('index', 0)
+        error_msg = failure.get('error', '')
 
-    # Combine all text for searching
-    all_text = ''
-    for msg in session_data.get('user_messages', []):
-        content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
-        all_text += content + '\n'
+        # Find a later command with the same prefix that isn't in failures
+        for cmd in commands:
+            cmd_text = cmd.get('command', '')
+            cmd_prefix = cmd_text.split()[0] if cmd_text else ''
+            cmd_index = cmd.get('index', 0)
 
-    # Get successful commands (not in failures)
-    failed_cmds = {f.get('command', '') for f in session_data.get('failures', [])}
-    successful_cmds = [
-        c.get('command', '') for c in session_data.get('commands', [])
-        if c.get('command', '') not in failed_cmds
+            if (cmd_prefix == failed_prefix and
+                cmd_index > failed_index and
+                cmd_text[:50] not in failed_commands):
+                # Found a resolution
+                proposals.append({
+                    'category': categorize_for_learning(error_msg),
+                    'title': f"Fix for {failed_prefix} failure",
+                    'description': f"Command `{failed_cmd[:80]}` failed with: {error_msg[:100]}",
+                    'solution': f"Use instead: `{cmd_text[:100]}`",
+                    'source': 'failure_resolution',
+                    'session_id': session_data.get('session_id', '')
+                })
+                break
+
+    return proposals
+
+
+def extract_repeated_failure_patterns(session_data: dict) -> list:
+    """Find failure categories that occurred multiple times in one session."""
+    failures = session_data.get('failures', [])
+    if len(failures) < 2:
+        return []
+
+    # Count error categories
+    categories = Counter()
+    category_examples = {}
+
+    for failure in failures:
+        error = failure.get('error', '')
+        cat = categorize_for_learning(error)
+        categories[cat] += 1
+        if cat not in category_examples:
+            category_examples[cat] = failure
+
+    proposals = []
+    for cat, count in categories.items():
+        if count >= 3:  # Only if it happened 3+ times in one session
+            example = category_examples[cat]
+            proposals.append({
+                'category': cat,
+                'title': f"Recurring {cat} errors ({count}x in session)",
+                'description': f"Hit {count} {cat} errors. Example: `{example.get('command', '')[:80]}`",
+                'solution': f"Error pattern: {example.get('error', '')[:100]}",
+                'source': 'repeated_pattern',
+                'session_id': session_data.get('session_id', '')
+            })
+
+    return proposals
+
+
+def categorize_for_learning(error_msg: str) -> str:
+    """Map error message to a learning category."""
+    error_lower = error_msg.lower()
+
+    mappings = [
+        ('shell', ['parse error', 'syntax error', 'unexpected token', 'unterminated', 'bad substitution']),
+        ('permissions', ['permission denied', 'access denied', 'eacces']),
+        ('paths', ['not found', 'no such file', 'enoent']),
+        ('network', ['connection refused', 'timeout', 'econnrefused']),
+        ('python', ['traceback', 'import error', 'no module named', 'typeerror']),
+        ('git', ['fatal:', 'merge conflict', 'detached head']),
+        ('npm', ['npm err', 'npm warn']),
+        ('aws', ['expired', 'credentials', 'access denied', 'invalididentity']),
     ]
 
-    # Extract credentials
-    creds = extract_credential_paths(all_text)
-    for cred in creds:
-        proposals.append({
-            'category': 'Credentials',
-            'title': f'Credential file: {Path(cred).name}',
-            'content': cred,
-            'suggested_scope': 'global'
-        })
+    for category, keywords in mappings:
+        if any(kw in error_lower for kw in keywords):
+            return category
 
-    # Extract tools
-    tools = extract_tool_paths(all_text, successful_cmds)
-    for tool in tools:
-        proposals.append({
-            'category': 'Tools',
-            'title': f'Tool: {Path(tool).name}',
-            'content': tool,
-            'suggested_scope': 'global'
-        })
-
-    # Extract env files
-    envs = extract_env_files(all_text)
-    for env in envs:
-        proposals.append({
-            'category': 'Credentials',
-            'title': f'Env file: {Path(env).name}',
-            'content': env,
-            'suggested_scope': 'global'
-        })
-
-    return proposals, is_complex_session(session_data)
+    return 'general'
 
 
 def main():
-    """Process session data from stdin or file argument."""
-    if len(sys.argv) > 1 and sys.argv[1] != '-':
-        session_file = Path(sys.argv[1])
-        if session_file.exists():
-            session_data = json.loads(session_file.read_text())
-        else:
-            print(f"File not found: {session_file}", file=sys.stderr)
-            sys.exit(1)
-    else:
+    # Read session data from stdin
+    try:
         session_data = json.load(sys.stdin)
+    except (json.JSONDecodeError, IOError):
+        print(json.dumps({'proposals_added': 0, 'error': 'invalid input'}))
+        sys.exit(0)
 
-    project = sys.argv[2] if len(sys.argv) > 2 else 'unknown'
+    # Get project folder from args
+    project_folder = sys.argv[2] if len(sys.argv) > 2 else None
+    if not project_folder:
+        print(json.dumps({'proposals_added': 0, 'error': 'no project folder'}))
+        sys.exit(0)
 
-    proposals, needs_api = extract_from_session(session_data, project)
+    proposals = []
 
-    # Add proposals to pending
+    # Extract resolution pairs (failed then succeeded)
+    proposals.extend(extract_failure_resolution_pairs(session_data))
+
+    # Extract repeated failure patterns
+    proposals.extend(extract_repeated_failure_patterns(session_data))
+
+    # Add unique proposals to pending
     added = 0
-    for p in proposals:
-        add_pending(
-            category=p['category'],
-            title=p['title'],
-            content=p['content'],
-            session_id=session_data.get('session_id', 'unknown'),
-            session_summary=session_data.get('summary', '')[:100],
-            project=project,
-            suggested_scope=p['suggested_scope'],
-            source='heuristic'
-        )
-        added += 1
+    for proposal in proposals:
+        if add_pending_learning(proposal, project_folder):
+            added += 1
 
-    result = {
-        'proposals_added': added,
-        'needs_api_analysis': needs_api
-    }
-
-    print(json.dumps(result))
+    print(json.dumps({'proposals_added': added}))
 
 
 if __name__ == '__main__':

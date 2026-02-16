@@ -1,117 +1,139 @@
 #!/usr/bin/env python3
 """
-Interactive learning review for /recall learn command.
-Shows pending learnings and accepts user input for approval.
+Review and manage pending learnings for the recall system.
+
+Usage:
+  recall-learn.py                    - Show pending learnings for review
+  recall-learn.py --batch            - Accept all pending learnings
+  recall-learn.py --approve <index>  - Approve specific learning
+  recall-learn.py --reject <index>   - Reject specific learning
 """
 
+import json
 import sys
+import os
 from pathlib import Path
 
 # Add lib to path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'lib'))
+LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
 
-from pending import load_pending, remove_pending, get_pending_count
-from knowledge import add_knowledge, CATEGORIES
+from knowledge import (
+    get_pending_learnings,
+    get_learnings,
+    approve_learning,
+    reject_learning,
+    approve_all_pending,
+    get_project_folder,
+)
 
 
 def format_learning(learning: dict, index: int) -> str:
-    """Format a learning for display."""
-    opposite = 'project' if learning['suggested_scope'] == 'global' else 'global'
-    lines = [
-        f"### {index}. [{learning['category']}] {learning['title']}",
-        f"From: {learning['session_summary']} ({learning['timestamp'][:10]})",
-        "",
-        f"  {learning['content']}",
-        "",
-        f"  Suggested: {learning['suggested_scope']}",
-        "",
-        f"  [a]ccept  [A]ccept to {opposite}  [e]dit  [r]eject  [s]kip"
-    ]
+    """Format a single learning for display."""
+    cat = learning.get('category', 'general')
+    title = learning.get('title', 'Unknown')
+    desc = learning.get('description', '')
+    solution = learning.get('solution', '')
+    source = learning.get('source', 'manual')
+
+    lines = [f"### [{index}] [{cat}] {title}"]
+    if desc:
+        lines.append(f"  {desc}")
+    if solution:
+        lines.append(f"  **Fix:** {solution}")
+    lines.append(f"  _Source: {source}_")
     return '\n'.join(lines)
 
 
-def show_pending():
-    """Show all pending learnings for review."""
-    data = load_pending()
-    pending = data.get('pending', [])
+def show_pending(project_folder: str):
+    """Show all pending learnings."""
+    pending = get_pending_learnings(project_folder)
+    approved = get_learnings(project_folder)
+
+    print("## Pending Learnings")
+    print()
+    print(f"**Approved:** {len(approved)} | **Pending:** {len(pending)}")
+    print()
 
     if not pending:
-        print("## No Pending Learnings")
+        print("No pending learnings to review.")
         print()
-        print("Knowledge extraction happens automatically at session end.")
-        print("Proposals will appear here for your review.")
+        print("Learnings are proposed automatically when:")
+        print("  - A command fails 3+ times with the same error category")
+        print("  - A failed command is followed by a successful variant")
+        print()
+        if approved:
+            print(f"You have {len(approved)} approved learnings. Use `/recall failures` to view them.")
         return
 
-    print(f"## Pending Learnings ({len(pending)} items)")
-    print()
-    print("Review each item and choose an action:")
-    print("  [a]ccept - Add with suggested scope")
-    print("  [A]ccept - Add with opposite scope")
-    print("  [e]dit  - Edit content before adding")
-    print("  [r]eject - Delete permanently")
-    print("  [s]kip  - Keep for later review")
-    print()
-
-    for i, learning in enumerate(pending, 1):
+    for i, learning in enumerate(pending):
         print(format_learning(learning, i))
         print()
 
+    print("---")
+    print("**Actions:**")
+    print("  `/recall learn --batch` - Accept all pending learnings")
+    print("  `/recall learn --approve 0` - Approve learning #0")
+    print("  `/recall learn --reject 0` - Reject learning #0")
 
-def process_action(learning_id: str, action: str, learning: dict) -> str:
-    """Process user action on a learning."""
-    if action == 'a':
-        # Accept with suggested scope
-        scope = learning['suggested_scope']
-        success = add_knowledge(learning['content'], learning['category'], scope)
-        if success:
-            remove_pending(learning_id)
-            return f"Added to {scope} CLAUDE.md"
-        return "Failed to add"
 
-    elif action == 'A':
-        # Accept with opposite scope
-        scope = 'project' if learning['suggested_scope'] == 'global' else 'global'
-        success = add_knowledge(learning['content'], learning['category'], scope)
-        if success:
-            remove_pending(learning_id)
-            return f"Added to {scope} CLAUDE.md"
-        return "Failed to add"
+def batch_approve(project_folder: str):
+    """Approve all pending learnings."""
+    count = approve_all_pending(project_folder)
+    if count > 0:
+        print(f"## Approved {count} learnings")
+        print()
+        print("These will now appear in `/recall failures` and session start context.")
+    else:
+        print("No pending learnings to approve.")
 
-    elif action == 'r':
-        # Reject
-        remove_pending(learning_id)
-        return "Rejected and removed"
 
-    elif action == 's':
-        # Skip
-        return "Skipped (will appear again)"
+def approve_one(project_folder: str, index_str: str):
+    """Approve a specific learning by index."""
+    try:
+        idx = int(index_str)
+    except ValueError:
+        print(f"Invalid index: {index_str}")
+        return
 
-    elif action == 'e':
-        # Edit - just inform, actual editing needs interactive input
-        return "Edit mode not available in batch. Use Claude to edit pending-learnings.json"
+    learning = approve_learning(idx, project_folder)
+    if learning:
+        print(f"Approved: [{learning.get('category')}] {learning.get('title')}")
+    else:
+        print(f"No pending learning at index {idx}")
 
-    return f"Unknown action: {action}"
+
+def reject_one(project_folder: str, index_str: str):
+    """Reject a specific learning by index."""
+    try:
+        idx = int(index_str)
+    except ValueError:
+        print(f"Invalid index: {index_str}")
+        return
+
+    learning = reject_learning(idx, project_folder)
+    if learning:
+        print(f"Rejected: [{learning.get('category')}] {learning.get('title')}")
+    else:
+        print(f"No pending learning at index {idx}")
 
 
 def main():
-    """Main entry point."""
-    if len(sys.argv) > 1 and sys.argv[1] == '--batch':
-        # Batch mode: accept all with suggested scope
-        data = load_pending()
-        for learning in data.get('pending', []):
-            result = process_action(learning['id'], 'a', learning)
-            print(f"{learning['title']}: {result}")
-        return
+    cwd = os.environ.get('CLAUDE_PROJECT_DIR') or os.getcwd()
+    project_folder = get_project_folder()
 
-    # Show mode (default)
-    show_pending()
+    args = sys.argv[1:]
 
-    # If there are pending items, show hint
-    count = get_pending_count()
-    if count > 0:
-        print("---")
-        print("To accept all with suggested scope: `/recall learn --batch`")
-        print("To review interactively, tell Claude which action to take on each item.")
+    if not args:
+        show_pending(project_folder)
+    elif args[0] == '--batch':
+        batch_approve(project_folder)
+    elif args[0] == '--approve' and len(args) > 1:
+        approve_one(project_folder, args[1])
+    elif args[0] == '--reject' and len(args) > 1:
+        reject_one(project_folder, args[1])
+    else:
+        show_pending(project_folder)
 
 
 if __name__ == '__main__':

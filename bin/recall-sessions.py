@@ -415,8 +415,185 @@ def show_failures(index: dict, project_folder: str):
         print()
 
 
-def show_cleanup_analysis(index: dict, sessions: list, project_folder: str):
-    """Analyze recall data and suggest cleanup actions."""
+def cleanup_noise_sessions(index: dict, project_folder: str):
+    """Remove low-value sessions (< 3 messages, no failures) from index."""
+    sessions_data = index.get('sessions', {})
+    removed = []
+
+    for sid in list(sessions_data.keys()):
+        session = sessions_data[sid]
+        if session.get('message_count', 0) < 3 and session.get('failure_count', 0) == 0:
+            removed.append(sid)
+            del sessions_data[sid]
+            # Also remove detail file
+            detail_file = get_session_details_dir(project_folder) / f"{sid}.json"
+            if detail_file.exists():
+                detail_file.unlink()
+
+    if removed:
+        save_index(project_folder, index)
+        print(f"Removed {len(removed)} low-value sessions from index")
+    else:
+        print("No low-value sessions to remove")
+
+
+def cleanup_sensitive_sessions(index: dict, project_folder: str):
+    """Remove sessions containing sensitive data from index and detail files."""
+    sessions_data = index.get('sessions', {})
+    sensitive_patterns = ['BEGIN OPENSSH', 'BEGIN RSA', 'API_KEY=', 'SECRET=', 'TOKEN=', 'password', 'PRIVATE KEY']
+    removed = []
+
+    for sid in list(sessions_data.keys()):
+        session = sessions_data[sid]
+        summary = session.get('summary', '')
+
+        # Check summary text
+        is_sensitive = any(p.lower() in summary.lower() for p in sensitive_patterns)
+
+        # Also check detail file
+        if not is_sensitive:
+            details = load_session_details(project_folder, sid)
+            if details:
+                for msg in details.get('user_messages', []):
+                    content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+                    if any(p.lower() in content.lower() for p in sensitive_patterns):
+                        is_sensitive = True
+                        break
+
+        if is_sensitive:
+            removed.append(sid)
+            del sessions_data[sid]
+            detail_file = get_session_details_dir(project_folder) / f"{sid}.json"
+            if detail_file.exists():
+                detail_file.unlink()
+
+    if removed:
+        save_index(project_folder, index)
+        print(f"Removed {len(removed)} sessions with sensitive data")
+    else:
+        print("No sessions with sensitive data found")
+
+
+def cleanup_jsonl_files(project_folder: str):
+    """Remove old raw .jsonl files to reclaim disk space."""
+    from datetime import timedelta
+
+    claude_dir = Path.home() / '.claude' / 'projects' / project_folder
+    if not claude_dir.exists():
+        print("No project directory found")
+        return
+
+    now = datetime.now()
+    session_max_age = timedelta(days=30)
+    agent_max_age = timedelta(days=7)
+    freed = 0
+    removed_count = 0
+
+    session_files = []
+    agent_files = []
+
+    for f in claude_dir.glob('*.jsonl'):
+        if f.name.startswith('agent-'):
+            agent_files.append(f)
+        else:
+            session_files.append(f)
+
+    # Keep 5 most recent session files, remove old ones
+    session_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    for f in session_files[5:]:
+        try:
+            age = now - datetime.fromtimestamp(f.stat().st_mtime)
+            if age > session_max_age:
+                size = f.stat().st_size
+                f.unlink()
+                freed += size
+                removed_count += 1
+        except:
+            pass
+
+    # Remove agent files older than 7 days
+    for f in agent_files:
+        try:
+            age = now - datetime.fromtimestamp(f.stat().st_mtime)
+            if age > agent_max_age:
+                size = f.stat().st_size
+                f.unlink()
+                freed += size
+                removed_count += 1
+        except:
+            pass
+
+    if freed > 0:
+        print(f"Removed {removed_count} files, freed {freed / 1024 / 1024:.1f} MB")
+    else:
+        print("No old .jsonl files to remove (sessions <30d, agents <7d)")
+
+
+def cleanup_dedup_failures(index: dict, project_folder: str):
+    """Deduplicate failure patterns in the index."""
+    failure_patterns = index.get('failure_patterns', {})
+    total_before = sum(len(v) for v in failure_patterns.values())
+    deduped = 0
+
+    for pattern in list(failure_patterns.keys()):
+        entries = failure_patterns[pattern]
+        seen = {}
+        unique = []
+
+        for entry in entries:
+            cmd_key = entry.get('command', '')[:50]
+            if cmd_key in seen:
+                # Merge into existing
+                seen[cmd_key]['count'] = seen[cmd_key].get('count', 1) + entry.get('count', 1)
+                seen[cmd_key]['date'] = max(seen[cmd_key].get('date', ''), entry.get('date', ''))
+                deduped += 1
+            else:
+                seen[cmd_key] = entry
+                unique.append(entry)
+
+        failure_patterns[pattern] = unique[-15:]  # Keep last 15
+
+    if deduped > 0:
+        save_index(project_folder, index)
+        total_after = sum(len(v) for v in failure_patterns.values())
+        print(f"Deduplicated failures: {total_before} -> {total_after} entries ({deduped} merged)")
+    else:
+        print("No duplicate failure patterns found")
+
+
+def show_cleanup_analysis(index: dict, sessions: list, project_folder: str, action: str = None):
+    """Analyze recall data and optionally perform cleanup actions.
+
+    Actions: --noise, --sensitive, --jsonl, --dedup, --all
+    No action = analysis only.
+    """
+    # If an action flag is given, perform that cleanup
+    if action:
+        action = action.strip().lstrip('-')
+        if action == 'noise':
+            cleanup_noise_sessions(index, project_folder)
+            return
+        elif action == 'sensitive':
+            cleanup_sensitive_sessions(index, project_folder)
+            return
+        elif action == 'jsonl':
+            cleanup_jsonl_files(project_folder)
+            return
+        elif action == 'dedup':
+            cleanup_dedup_failures(index, project_folder)
+            return
+        elif action == 'all':
+            print("## Running all cleanup actions")
+            print()
+            cleanup_sensitive_sessions(index, project_folder)
+            cleanup_noise_sessions(index, project_folder)
+            cleanup_dedup_failures(index, project_folder)
+            cleanup_jsonl_files(project_folder)
+            print()
+            print("Cleanup complete.")
+            return
+
+    # Default: analysis mode
     print("## Recall Cleanup Analysis")
     print()
 
@@ -434,24 +611,18 @@ def show_cleanup_analysis(index: dict, sessions: list, project_folder: str):
     sensitive_sessions = []
     useful_sessions = []
 
-    sensitive_patterns = ['BEGIN OPENSSH', 'BEGIN RSA', 'API_KEY=', 'SECRET=', 'TOKEN=', 'password']
+    sensitive_patterns = ['BEGIN OPENSSH', 'BEGIN RSA', 'API_KEY=', 'SECRET=', 'TOKEN=', 'password', 'PRIVATE KEY']
 
     for sid, session in sessions_data.items():
         msg_count = session.get('message_count', 0)
-        messages = session.get('user_messages', [])
+        summary = session.get('summary', '')
 
-        # Check for sensitive data
-        has_sensitive = False
-        for msg in messages:
-            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
-            for pattern in sensitive_patterns:
-                if pattern.lower() in content.lower():
-                    has_sensitive = True
-                    break
+        # Check for sensitive data in summary
+        has_sensitive = any(p.lower() in summary.lower() for p in sensitive_patterns)
 
         if has_sensitive:
             sensitive_sessions.append((sid, session))
-        elif msg_count < 3:
+        elif msg_count < 3 and session.get('failure_count', 0) == 0:
             noise_sessions.append((sid, session))
         else:
             useful_sessions.append((sid, session))
@@ -459,18 +630,18 @@ def show_cleanup_analysis(index: dict, sessions: list, project_folder: str):
     # Report
     print(f"### Sessions: {len(sessions_data)} total")
     print(f"  - Useful: {len(useful_sessions)}")
-    print(f"  - Low-value (< 3 msgs): {len(noise_sessions)}")
-    print(f"  - **Contains sensitive data: {len(sensitive_sessions)}** {'⚠️  DELETE THESE' if sensitive_sessions else ''}")
+    print(f"  - Low-value (< 3 msgs, no failures): {len(noise_sessions)}")
+    print(f"  - Contains sensitive data: {len(sensitive_sessions)}")
     print()
 
     if sensitive_sessions:
-        print("### ⚠️  Sessions with sensitive data:")
+        print("### Sessions with sensitive data:")
         for sid, session in sensitive_sessions:
             print(f"  - `{sid[:8]}...` ({format_date(session.get('date', ''))})")
         print()
 
     if noise_sessions:
-        print("### Low-value sessions (candidates for removal):")
+        print("### Low-value sessions:")
         for sid, session in noise_sessions[:5]:
             summary = session.get('summary', 'No summary')[:60]
             print(f"  - `{sid[:8]}...`: {summary}")
@@ -481,38 +652,59 @@ def show_cleanup_analysis(index: dict, sessions: list, project_folder: str):
     # Analyze failure patterns
     failure_patterns = index.get('failure_patterns', {})
     total_failures = sum(len(v) for v in failure_patterns.values())
-    print(f"### Failure Patterns: {len(failure_patterns)} categories, {total_failures} total")
-    if total_failures > 20:
-        print("  Consider clearing noise - keep only actionable patterns")
+    # Count potential duplicates
+    dup_count = 0
+    for entries in failure_patterns.values():
+        seen_cmds = set()
+        for e in entries:
+            cmd_key = e.get('command', '')[:50]
+            if cmd_key in seen_cmds:
+                dup_count += 1
+            seen_cmds.add(cmd_key)
+
+    print(f"### Failure Patterns: {len(failure_patterns)} categories, {total_failures} entries")
+    if dup_count > 0:
+        print(f"  {dup_count} duplicate entries found")
     print()
 
     # Check learnings
     learnings = index.get('learnings', [])
-    print(f"### Learnings: {len(learnings)}")
+    pending = index.get('pending_learnings', [])
+    print(f"### Learnings: {len(learnings)} approved, {len(pending)} pending")
     if learnings:
         categories = set(l.get('category', 'unknown') for l in learnings if isinstance(l, dict))
         print(f"  Categories: {', '.join(sorted(categories))}")
-    else:
-        print("  ⚠️  No learnings defined - consider adding best practices")
     print()
 
     # Disk usage
     claude_dir = Path.home() / '.claude' / 'projects' / project_folder
     total_size = 0
-    jsonl_files = list(claude_dir.glob('*.jsonl'))
-    for f in jsonl_files:
-        total_size += f.stat().st_size
+    session_count = 0
+    agent_count = 0
+    agent_size = 0
+
+    for f in claude_dir.glob('*.jsonl'):
+        size = f.stat().st_size
+        total_size += size
+        if f.name.startswith('agent-'):
+            agent_count += 1
+            agent_size += size
+        else:
+            session_count += 1
 
     print(f"### Disk Usage")
-    print(f"  - {len(jsonl_files)} session files")
-    print(f"  - {total_size / 1024 / 1024:.1f} MB total")
-    if total_size > 50 * 1024 * 1024:
-        print("  ⚠️  Consider deleting old .jsonl files")
+    print(f"  - {session_count} session files, {agent_count} agent files")
+    print(f"  - {total_size / 1024 / 1024:.1f} MB total ({agent_size / 1024 / 1024:.1f} MB agents)")
     print()
 
+    # Show available cleanup actions
     print("---")
-    print("To clean: Read the index file, remove noise, add learnings, write back.")
-    print("Key learnings to ensure: BB tools at ~/code/kureapp-tools/bitbucket/")
+    print("### Cleanup Commands")
+    print("  `/recall cleanup --noise` - Remove {0} low-value sessions".format(len(noise_sessions)))
+    print("  `/recall cleanup --sensitive` - Remove {0} sessions with sensitive data".format(len(sensitive_sessions)))
+    print("  `/recall cleanup --jsonl` - Remove old .jsonl files (>30d sessions, >7d agents)")
+    print("  `/recall cleanup --dedup` - Deduplicate {0} failure pattern entries".format(dup_count))
+    print("  `/recall cleanup --all` - Run all cleanup actions")
 
 def show_last_session(index: dict, sessions: list, project_folder: str):
     """Show previous session details.
@@ -611,11 +803,27 @@ def search_sessions(search_term: str, index: dict, sessions: list, project_folde
             details = load_session_details(project_folder, session_id)
 
             if details:
-                # Search in detail file (more content)
+                # Search in user messages
                 for msg in details.get('user_messages', []):
                     content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
                     if search_lower in content.lower():
-                        matches.append(content)
+                        matches.append(f"msg: {content}")
+
+                # Search in commands
+                for cmd in details.get('commands', []):
+                    cmd_text = cmd.get('command', '')
+                    if search_lower in cmd_text.lower():
+                        matches.append(f"cmd: `{cmd_text}`")
+
+                # Search in failures
+                for fail in details.get('failures', []):
+                    if search_lower in fail.get('error', '').lower() or search_lower in fail.get('command', '').lower():
+                        matches.append(f"fail: `{fail.get('command', '')[:60]}` -> {fail.get('error', '')[:80]}")
+
+                # Search in skills
+                for skill in details.get('skills_used', []):
+                    if search_lower in skill.get('skill', '').lower():
+                        matches.append(f"skill: {skill.get('skill', '')}")
             else:
                 # Fall back to summary in index
                 summary = session_summary.get('summary', '')
@@ -625,8 +833,10 @@ def search_sessions(search_term: str, index: dict, sessions: list, project_folde
             if matches:
                 found = True
                 print(f"### {format_date(session_summary.get('date', ''))} ({session_id[:8]}...)")
-                for match in matches[:3]:
-                    print(f"  > {match[:200]}...")
+                for match in matches[:5]:
+                    print(f"  > {match[:200]}")
+                if len(matches) > 5:
+                    print(f"  ... and {len(matches) - 5} more matches")
                 print()
 
         # Also search failure patterns
@@ -793,7 +1003,7 @@ def main():
         elif cmd_name == 'reset':
             reset_index(index, project_folder)
         elif cmd_name == 'cleanup':
-            show_cleanup_analysis(index, sessions, project_folder)
+            show_cleanup_analysis(index, sessions, project_folder, cmd_arg)
         elif cmd_name == 'learn':
             # Run the learn script
             learn_script = Path(__file__).parent / 'recall-learn.py'

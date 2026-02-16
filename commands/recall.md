@@ -4,19 +4,27 @@ Uses a unified index that captures user messages, bash commands, and failure pat
 
 Usage:
 - `/recall` - List recent sessions with summaries and stats
-- `/recall [search term]` - Search past sessions for specific topics
+- `/recall [search term]` - Search past sessions (messages, commands, failures, skills)
 - `/recall last` - Show details from the most recent previous session
 - `/recall failures` - Show failure patterns and learnings
 - `/recall knowledge` - Show current CLAUDE.md contents (global and project)
-- `/recall cleanup` - Clean up old sessions and manage learnings
+- `/recall stats` - Show skill and learning usage statistics
+- `/recall cleanup` - Analyze index and show available cleanup actions
+- `/recall cleanup --noise` - Remove low-value sessions (<3 msgs, no failures)
+- `/recall cleanup --sensitive` - Remove sessions containing secrets/tokens
+- `/recall cleanup --jsonl` - Remove old .jsonl files (>30d sessions, >7d agents)
+- `/recall cleanup --dedup` - Deduplicate failure pattern entries
+- `/recall cleanup --all` - Run all cleanup actions
 - `/recall learn` - Review and approve pending learnings
-- `/recall learn --batch` - Accept all pending learnings with suggested scope
+- `/recall learn --batch` - Accept all pending learnings
+- `/recall learn --approve N` - Approve specific pending learning by index
+- `/recall learn --reject N` - Reject specific pending learning by index
 
 Examples:
 - `/recall linkedin` - Find discussions about LinkedIn
 - `/recall permission denied` - Find when you hit permission errors
 - `/recall failures` - See learnings and best practices
-- `/recall cleanup` - Remove noise, add learnings
+- `/recall cleanup --all` - Clean everything at once
 
 Run the session parser script and display results:
 ```
@@ -37,41 +45,31 @@ python3 ~/.claude/bin/recall-sessions.py "$PWD" $ARGUMENTS
 
 ## Cleanup Mode
 
-When `/recall cleanup` is invoked, Claude should:
+`/recall cleanup` without flags shows an analysis report with suggested actions.
+With flags, it performs the cleanup directly:
 
-1. **Read the recall-index.json** at `~/.claude/projects/{project}/recall-index.json`
+- `--noise` - Removes sessions with <3 messages and no failures from index + detail files
+- `--sensitive` - Removes sessions containing secrets (API keys, tokens, SSH keys, passwords)
+- `--jsonl` - Removes raw .jsonl files older than 30 days (agents: 7 days), keeps 5 most recent
+- `--dedup` - Merges duplicate failure pattern entries (same command prefix)
+- `--all` - Runs all four cleanup actions in sequence
 
-2. **Analyze sessions for usefulness:**
-   - Sessions with <3 messages and no failures = likely noise
-   - Sessions with only context continuation messages = noise
-   - Sessions containing sensitive data (keys, tokens) = DELETE immediately
-   - Sessions >7 days old with no learnings extracted = candidates for removal
+## Learning System
 
-3. **Clean failure_patterns:**
-   - Remove one-off errors that aren't recurring
-   - Remove errors for non-existent domains/files (not actionable)
-   - Keep only patterns that have actionable fixes
+Learnings are automatically proposed by `extract-knowledge.py` when:
+- A command fails 3+ times in a session with the same error category
+- A failed command is followed by a successful variant (resolution pair)
 
-4. **Add/update learnings:**
-   Learnings should be structured as:
-   ```json
-   {
-     "category": "bitbucket|shell|git|ssh|deployment|python|etc",
-     "title": "Short descriptive title",
-     "description": "What the issue/pattern is",
-     "solution": "How to fix or avoid it",
-     "tools": {"tool_name": "usage example"},  // optional
-     "examples": ["example command 1", "example command 2"]  // optional
-   }
-   ```
+Use `/recall learn` to review pending proposals, or `/recall learn --batch` to accept all.
 
-5. **Key learnings to always include for this project:**
-   - Bitbucket CLI tools at `~/code/kureapp-tools/bitbucket/` (NOT gh!)
-   - Token at `~/.bb-cli-personal-token`
-   - Pipelines auto-deploy on merge to dev - don't SSH to deploy
+Learnings are structured as:
+```json
+{
+  "category": "shell|git|aws|python|etc",
+  "title": "Short descriptive title",
+  "description": "What the issue/pattern is",
+  "solution": "How to fix or avoid it"
+}
+```
 
-6. **Optionally clean raw .jsonl files** if they're taking too much space
-
-After cleanup, run `/recall failures` to verify the learnings look correct.
-
-After showing results, offer to help with any incomplete tasks found or provide more detail on specific sessions.
+After cleanup or learning approval, run `/recall failures` to verify results.

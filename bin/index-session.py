@@ -13,12 +13,32 @@ import sys
 import os
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 # Index size limits
 MAX_SESSIONS_IN_INDEX = 50  # Keep summaries for last 50 sessions
 MAX_INDEX_SIZE_KB = 60      # Target max size for main index
+
+# Topic stop words (common English words that start with capital letters)
+TOPIC_STOP_WORDS = {
+    'The', 'This', 'That', 'These', 'Those', 'There', 'Then', 'They',
+    'What', 'When', 'Where', 'Which', 'While', 'Who', 'Why', 'How',
+    'And', 'But', 'For', 'Not', 'With', 'From', 'Into', 'Over',
+    'Can', 'Could', 'Would', 'Should', 'Will', 'May', 'Might',
+    'Use', 'Used', 'Using', 'Make', 'Made', 'Get', 'Got', 'Set',
+    'Run', 'Let', 'See', 'Try', 'Add', 'Check', 'Show', 'Find',
+    'Create', 'Update', 'Delete', 'Remove', 'Change', 'Move',
+    'Yes', 'No', 'Ok', 'Sure', 'Thanks', 'Please', 'Also',
+    'Here', 'Now', 'Just', 'All', 'Any', 'Some', 'Each', 'Every',
+    'New', 'Old', 'First', 'Last', 'Next', 'Other', 'More', 'Most',
+    'Need', 'Want', 'Like', 'Look', 'Take', 'Give', 'Keep', 'Put',
+    'Does', 'Did', 'Has', 'Have', 'Had', 'Was', 'Were', 'Are',
+    'Fix', 'Help', 'Start', 'Stop', 'Open', 'Close', 'Read', 'Write',
+}
+
+# Trivial messages to skip in summary generation
+TRIVIAL_MESSAGES = {'yes', 'no', 'ok', 'okay', 'sure', 'thanks', 'y', 'n', 'continue', 'go ahead', 'do it'}
 
 
 def get_project_folder(cwd: str) -> str:
@@ -80,9 +100,13 @@ def parse_session_full(session_file: Path) -> dict:
                                 'content': content[:200],  # Reduced from 500
                                 'timestamp': obj.get('timestamp', '')
                             })
-                            # Extract potential topics (capitalized words, technical terms)
+                            # Extract potential topics (capitalized words, technical terms, file paths)
                             words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b|\b[a-z]+(?:_[a-z]+)+\b', content)
-                            result['topics'].update(words[:10])
+                            filtered = [w for w in words if w not in TOPIC_STOP_WORDS]
+                            result['topics'].update(filtered[:10])
+                            # Also extract file paths and technical identifiers
+                            paths = re.findall(r'[\w./~-]+\.(?:py|js|ts|json|sh|md|env|yml|yaml)\b', content)
+                            result['topics'].update(p.split('/')[-1] for p in paths[:5])
 
                 # Extract tool calls (bash commands and skill invocations)
                 if obj.get('type') == 'assistant':
@@ -155,10 +179,32 @@ def parse_session_full(session_file: Path) -> dict:
     except Exception as e:
         result['error'] = str(e)
 
-    # Generate summary from first few user messages
+    # Generate smarter summary
     if result['user_messages']:
-        first_msgs = [m['content'] for m in result['user_messages'][:3]]
-        result['summary'] = ' | '.join(m[:100] for m in first_msgs)
+        # Filter out trivial and system messages
+        meaningful = [
+            m['content'] for m in result['user_messages']
+            if m['content'].strip().lower() not in TRIVIAL_MESSAGES
+            and not m['content'].startswith('/')  # Skip slash commands
+            and len(m['content'].strip()) > 10    # Skip very short messages
+        ]
+
+        if meaningful:
+            # Use first substantial message as primary summary
+            primary = meaningful[0][:150]
+            # Add skill tag if any skills were used
+            if result['skills_used']:
+                skill_tag = result['skills_used'][0]['skill'].split(':')[-1]
+                result['summary'] = f"[{skill_tag}] {primary}"
+            else:
+                result['summary'] = primary
+            # Append second message if short enough and adds context
+            if len(meaningful) > 1 and len(result['summary']) < 120:
+                result['summary'] += f" | {meaningful[1][:60]}"
+        else:
+            # Fallback to old behavior
+            first_msgs = [m['content'] for m in result['user_messages'][:3]]
+            result['summary'] = ' | '.join(m[:100] for m in first_msgs)
 
     # Convert topics set to list for JSON serialization
     result['topics'] = list(result['topics'])[:20]
@@ -239,10 +285,13 @@ def create_session_summary(session_data: dict) -> dict:
     """Create a lightweight summary for the main index.
 
     Only includes essential info - full details in separate file.
+    Uses the pre-computed smart summary from parse_session_full.
     """
-    # Extract first 3 user messages for summary text
-    first_msgs = [m['content'][:80] for m in session_data.get('user_messages', [])[:3]]
-    summary_text = ' | '.join(first_msgs)
+    summary_text = session_data.get('summary', '')
+    if not summary_text:
+        # Fallback
+        first_msgs = [m['content'][:80] for m in session_data.get('user_messages', [])[:3]]
+        summary_text = ' | '.join(first_msgs)
 
     return {
         'date': session_data['date'],
@@ -309,6 +358,59 @@ def cleanup_old_detail_files(project_folder: str, keep_count: int = 100):
             f.unlink()
         except:
             pass
+
+
+def cleanup_old_jsonl_files(project_folder: str):
+    """Remove old raw .jsonl files to reclaim disk space.
+
+    - Session .jsonl files older than 30 days are removed
+    - Agent/subagent .jsonl files older than 7 days are removed
+    - The most recent 5 session files are always kept regardless of age
+    """
+    claude_dir = Path.home() / '.claude' / 'projects' / project_folder
+    if not claude_dir.exists():
+        return
+
+    now = datetime.now()
+    session_max_age = timedelta(days=30)
+    agent_max_age = timedelta(days=7)
+    freed = 0
+
+    # Separate session and agent files
+    session_files = []
+    agent_files = []
+
+    for f in claude_dir.glob('*.jsonl'):
+        if f.name.startswith('agent-'):
+            agent_files.append(f)
+        else:
+            session_files.append(f)
+
+    # Sort session files by mtime, keep most recent 5
+    session_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    for f in session_files[5:]:  # Skip 5 most recent
+        try:
+            age = now - datetime.fromtimestamp(f.stat().st_mtime)
+            if age > session_max_age:
+                size = f.stat().st_size
+                f.unlink()
+                freed += size
+        except:
+            pass
+
+    # Clean old agent files (more aggressive - 7 days)
+    for f in agent_files:
+        try:
+            age = now - datetime.fromtimestamp(f.stat().st_mtime)
+            if age > agent_max_age:
+                size = f.stat().st_size
+                f.unlink()
+                freed += size
+        except:
+            pass
+
+    if freed > 0:
+        print(f"  Cleaned {freed / 1024 / 1024:.1f} MB of old session files")
 
 
 def save_index(project_folder: str, index: dict):
@@ -380,16 +482,33 @@ def main():
             # Keep only last 10 sessions per skill
             index['usage']['skills'][skill_name]['sessions'] = index['usage']['skills'][skill_name]['sessions'][-10:]
 
-    # Merge failure patterns into global patterns (kept in index for quick failures view)
+    # Merge failure patterns into global patterns with deduplication
     for pattern, failures in session_data['failure_patterns'].items():
         if pattern not in index['failure_patterns']:
             index['failure_patterns'][pattern] = []
+
+        existing = index['failure_patterns'][pattern]
+        existing_cmds = {f.get('command', '')[:50] for f in existing[-5:]}
+
         for f in failures:
             f['session_id'] = session_id
             f['date'] = session_data['date']
-            index['failure_patterns'][pattern].append(f)
+            cmd_prefix = f.get('command', '')[:50]
+
+            # Deduplicate: if same command prefix in recent entries, increment count instead
+            if cmd_prefix in existing_cmds:
+                for entry in reversed(existing):
+                    if entry.get('command', '')[:50] == cmd_prefix:
+                        entry['count'] = entry.get('count', 1) + 1
+                        entry['date'] = session_data['date']  # Update to latest
+                        break
+            else:
+                f['count'] = 1
+                existing.append(f)
+                existing_cmds.add(cmd_prefix)
+
         # Keep only last 15 of each pattern in index
-        index['failure_patterns'][pattern] = index['failure_patterns'][pattern][-15:]
+        index['failure_patterns'][pattern] = existing[-15:]
 
     # Save updated index
     save_index(project_folder, index)
@@ -425,10 +544,11 @@ def main():
         # Don't fail indexing if extraction fails
         pass
 
-    # Periodic cleanup of old detail files (every ~10 sessions)
+    # Periodic cleanup (every ~10 sessions)
     import random
     if random.random() < 0.1:
         cleanup_old_detail_files(project_folder)
+        cleanup_old_jsonl_files(project_folder)
 
     skills_msg = f", {len(session_data['skills_used'])} skills" if session_data['skills_used'] else ""
     print(f"Indexed session {session_id[:8]}... ({len(session_data['user_messages'])} messages, {len(session_data['commands'])} commands, {len(session_data['failures'])} failures{skills_msg})")
